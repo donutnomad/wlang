@@ -64,11 +64,28 @@ type Array struct {
 // ---------- Statements ----------
 
 // Let defines a local variable.
+// LetBinding is a single (name, type, expr) entry inside a let. When more
+// than one binding appears in the same let object the form is "destructuring"
+// (LANGUAGE.md §3.4 / TC-231); the bindings are evaluated left-to-right and
+// each name becomes a fresh variable in the current scope.
+type LetBinding struct {
+	Name string
+	Type string // optional declared type (TC-232)
+	Expr Node
+}
+
 type Let struct {
 	Base
+	// Name/Type/Expr describe a single binding for backward compatibility
+	// with code paths that pre-date destructuring let. They mirror Bindings[0]
+	// when len(Bindings)==1.
 	Name string
 	Type string // optional declared type
 	Expr Node
+	// Bindings is the canonical multi-binding list. parse.go always
+	// populates it; consumers should iterate Bindings instead of using
+	// Name/Type/Expr directly.
+	Bindings []LetBinding
 }
 
 // Set assigns to an existing variable (inner-most search outwards).
@@ -142,11 +159,64 @@ type Try struct {
 	Catch []Node
 }
 
+// MatchCase is a single arm of a match expression: `when` is the value to
+// compare to the scrutinee; `do` is the statement block to evaluate on hit.
+type MatchCase struct {
+	When Node
+	Do   []Node
+}
+
+// Match is the multi-way value-equality dispatch expression (§14.2).
+//
+// Semantics: evaluate Value, then evaluate each Cases[i].When in order
+// comparing for runtime equality. The first matching case's Do block is
+// executed and its last expression value is returned. If no case matches,
+// the Default block (if present) executes; otherwise the result is null.
+type Match struct {
+	Base
+	Value   Node
+	Cases   []MatchCase
+	Default []Node
+}
+
 // Program is a sequence of statements.
 type Program struct {
 	Lang    string
 	Imports []string
 	Body    []Node
+	// Diagnostics carries non-fatal compile-time messages such as deprecation
+	// notices emitted by Normalize (LANGUAGE.md §13.2 / TC-604, TC-882).
+	Diagnostics []Diagnostic
+	// CompileTrace records the pipeline phase ordering when compilation is
+	// run with Trace enabled (LANGUAGE.md §7.1 / TC-600).
+	CompileTrace []TraceEvent
+}
+
+// TraceEvent records that one compilation phase ran (TC-600).
+type TraceEvent struct {
+	Phase      string
+	Order      int
+	DurationUs int64
+}
+
+// Severity classifies a Diagnostic.
+type Severity string
+
+const (
+	// SeverityDeprecation marks legacy syntax that was migrated.
+	SeverityDeprecation Severity = "deprecation"
+	// SeverityWarning is a non-fatal compiler warning.
+	SeverityWarning Severity = "warning"
+	// SeverityInfo is a purely informational diagnostic.
+	SeverityInfo Severity = "info"
+)
+
+// Diagnostic carries a non-fatal compile-time message (LANGUAGE.md §13.2).
+type Diagnostic struct {
+	Severity Severity
+	Code     string
+	Path     string
+	Message  string
 }
 
 // helper for constructing path strings

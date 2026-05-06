@@ -33,6 +33,8 @@ func (e *Executor) Eval(n ast.Node) (types.Value, error) {
 		// try used in expression position: fold return/last-value, propagate panic.
 		v, _, err := e.execTry(x)
 		return v, err
+	case *ast.Match:
+		return e.evalMatch(x)
 	}
 	return types.Value{}, werr.Newf(werr.CodeASTShape,
 		"cannot evaluate %T as expression", n).WithPath(nodePath(n))
@@ -69,6 +71,10 @@ const pkgTypeName = "__pkg__"
 type pkgRef struct{ Name string }
 
 func (e *Executor) evalArray(a *ast.Array) (types.Value, error) {
+	if e.budget.MaxArrayLength > 0 && len(a.Items) > e.budget.MaxArrayLength {
+		return types.Value{}, werr.Newf(werr.CodeBudget,
+			"MaxArrayLength exceeded (%d)", e.budget.MaxArrayLength).WithPath(a.Path())
+	}
 	vals := make([]types.Value, 0, len(a.Items))
 	for _, item := range a.Items {
 		v, err := e.Eval(item)
@@ -109,6 +115,31 @@ func (e *Executor) evalIfExpr(x *ast.IfStmt) (types.Value, error) {
 	return e.evalBlock(branch)
 }
 
+// evalMatch evaluates a match expression (LANGUAGE.md §14.2). It evaluates the
+// scrutinee, then walks each case's `when` expression in order; the first case
+// whose when value compares equal to the scrutinee runs and its block result is
+// returned. If no case matches, the Default block runs (or null is returned).
+func (e *Executor) evalMatch(m *ast.Match) (types.Value, error) {
+	v, err := e.Eval(m.Value)
+	if err != nil {
+		return types.Value{}, err
+	}
+	for _, c := range m.Cases {
+		w, err := e.Eval(c.When)
+		if err != nil {
+			return types.Value{}, err
+		}
+		if equalValues(v, w) {
+			return e.evalBlock(c.Do)
+		}
+	}
+	if len(m.Default) > 0 {
+		return e.evalBlock(m.Default)
+	}
+	null, _ := types.NewNull()
+	return null, nil
+}
+
 // evalBlock runs statements within a new scope and returns the result of the
 // last expression-yielding statement (return / last return-like).
 func (e *Executor) evalBlock(stmts []ast.Node) (types.Value, error) {
@@ -143,6 +174,16 @@ func (e *Executor) evalCall(c *ast.Call) (types.Value, error) {
 	if len(c.Args) == 0 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
 			"call %q requires at least a receiver argument", c.Op).WithPath(c.Path())
+	}
+	// Enforce MaxCallDepth (§10.1 / TC-801) around host invocation. Builtin
+	// arithmetic/compare ops are exempt — they don't recurse via the registry.
+	if e.budget.MaxCallDepth > 0 {
+		e.callDepth++
+		defer func() { e.callDepth-- }()
+		if e.callDepth > e.budget.MaxCallDepth {
+			return types.Value{}, werr.Newf(werr.CodeBudget,
+				"MaxCallDepth exceeded (%d)", e.budget.MaxCallDepth).WithPath(c.Path())
+		}
 	}
 	recv, err := e.Eval(c.Args[0])
 	if err != nil {

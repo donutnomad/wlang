@@ -3,11 +3,16 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 
 	"github.com/wflang/wflang/ast"
 	werr "github.com/wflang/wflang/errors"
 	"github.com/wflang/wflang/types"
 )
+
+// atomicInt32 is sync/atomic.Int32 imported under a local name so the executor
+// struct stays compact.
+type atomicInt32 = atomic.Int32
 
 // yieldLike is the duck-typed interface the runtime uses to detect yield errors
 // without importing the wflang facade package. Any error that exposes Token()
@@ -16,6 +21,13 @@ type yieldLike interface {
 	error
 	Token() string
 	Payload() any
+}
+
+// yieldWithTypes is the optional extension that registry envelopes implement
+// to carry the yielding host function's business ReturnTypes (§8 / TC-704).
+type yieldWithTypes interface {
+	yieldLike
+	ReturnTypes() []string
 }
 
 // asYield inspects an error chain and returns the first yieldLike encountered.
@@ -27,8 +39,18 @@ func asYield(err error) (yieldLike, bool) {
 	if errors.As(err, &y) {
 		return y, true
 	}
-	// errors.As uses target type; yieldLike is an interface, so As works through
-	// wrappers already. Nothing else to do.
+	return nil, false
+}
+
+// asYieldWithTypes attempts to recover the typed envelope variant.
+func asYieldWithTypes(err error) (yieldWithTypes, bool) {
+	if err == nil {
+		return nil, false
+	}
+	var y yieldWithTypes
+	if errors.As(err, &y) {
+		return y, true
+	}
 	return nil, false
 }
 
@@ -112,6 +134,7 @@ type Executor struct {
 	loopCount    int64
 	callDepth    int
 	maxLoopCtx   int // current loop depth for break/continue validity
+	routineCount atomicInt32
 	onRoutineErr RoutineErrorHandler
 	onYield      RoutineYieldHandler
 }
@@ -167,16 +190,27 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 	}
 	switch x := n.(type) {
 	case *ast.Let:
-		v, err := e.Eval(x.Expr)
-		if err != nil {
-			return types.Value{}, sigNone, err
+		// Multi-binding (destructuring) is the canonical form (TC-231); a
+		// single-binding let still populates Bindings[0] in addition to the
+		// legacy Name/Type/Expr fields.
+		bindings := x.Bindings
+		if len(bindings) == 0 {
+			bindings = []ast.LetBinding{{Name: x.Name, Type: x.Type, Expr: x.Expr}}
 		}
-		if x.Type != "" && x.Type != v.TypeName() {
-			return types.Value{}, sigNone, werr.Newf(werr.CodeType,
-				"let %s: declared %s, got %s", x.Name, x.Type, v.TypeName()).WithPath(x.Path())
+		var last types.Value
+		for _, b := range bindings {
+			v, err := e.Eval(b.Expr)
+			if err != nil {
+				return types.Value{}, sigNone, err
+			}
+			if b.Type != "" && b.Type != v.TypeName() {
+				return types.Value{}, sigNone, werr.Newf(werr.CodeType,
+					"let %s: declared %s, got %s", b.Name, b.Type, v.TypeName()).WithPath(x.Path())
+			}
+			e.scope.Let(b.Name, v, b.Type)
+			last = v
 		}
-		e.scope.Let(x.Name, v, x.Type)
-		return v, sigNone, nil
+		return last, sigNone, nil
 	case *ast.Set:
 		v, err := e.Eval(x.Expr)
 		if err != nil {
@@ -246,6 +280,9 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 		return e.execRoutine(x)
 	case *ast.Try:
 		return e.execTry(x)
+	case *ast.Match:
+		v, err := e.evalMatch(x)
+		return v, sigNone, err
 	}
 	// Fallback: statement is actually an expression-producing node.
 	v, err := e.Eval(n)
@@ -596,22 +633,59 @@ func (e *Executor) RunProgram(p *ast.Program) (types.Value, error) {
 //   - any other error                    → RoutineErrorHandler
 //
 // The statement itself returns null immediately (fire-and-forget, §3.3).
+// Concurrent routines are capped by Budget.MaxRoutines (§10.1 / TC-803).
+//
+// The goroutine runs against an isolated child Executor so per-step counters
+// (stepCount, loopCount, callDepth) do not race with the parent goroutine.
+// The routineCount counter remains shared (it's atomic).
 func (e *Executor) execRoutine(x *ast.Routine) (types.Value, Signal, error) {
+	if e.budget.MaxRoutines > 0 {
+		current := e.routineCount.Add(1)
+		if int(current) > e.budget.MaxRoutines {
+			e.routineCount.Add(-1)
+			return types.Value{}, sigNone, werr.Newf(werr.CodeBudget,
+				"MaxRoutines exceeded (%d)", e.budget.MaxRoutines).
+				WithPath(x.Path())
+		}
+	}
 	call := x.Call
 	ctx := e.ctx
 	onErr := e.onRoutineErr
 	onYield := e.onYield
+	// Build a child executor that shares registry/pkgs/budget/scope but
+	// owns its own per-counter state. The scope chain is read-only from
+	// the routine's perspective (the host call args are evaluated below).
+	child := &Executor{
+		ctx:      ctx,
+		scope:    e.scope,
+		registry: e.registry,
+		pkgs:     e.pkgs,
+		budget:   e.budget,
+	}
+	// Share the parent's atomic routineCount so MaxRoutines accounting works
+	// across the family of executors. Since atomic.Int32 is not copyable,
+	// callers must reach the parent's counter via a helper rather than the
+	// embedded field directly. We inline the bookkeeping in the goroutine.
 	go func() {
-		_, err := e.evalCall(call)
+		defer func() {
+			if e.budget.MaxRoutines > 0 {
+				e.routineCount.Add(-1)
+			}
+		}()
+		_, err := child.evalCall(call)
 		if err == nil {
 			return
 		}
 		if y, ok := asYield(err); ok {
+			report := RoutineYieldReport{
+				Token: y.Token(),
+				Path:  call.Path(),
+			}
+			if yt, ok := asYieldWithTypes(err); ok {
+				report.ReturnTypes = yt.ReturnTypes()
+			}
 			if onYield != nil {
-				onYield(ctx, RoutineYieldReport{
-					Token: y.Token(),
-					Path:  call.Path(),
-				})
+				onYield(ctx, report)
 			}
 			return
 		}

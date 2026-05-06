@@ -153,6 +153,19 @@ func NewLiteral(typeName, raw string) (Value, error) {
 		}
 		return Value{typ: typeName, val: br}, nil
 	default:
+		// Custom literal constructor registered via RegisterLiteralConstructor
+		// (LANGUAGE.md §4.5 BindOptions.Constructor / TC-360).
+		if fn, ok := lookupLiteralConstructor(typeName); ok {
+			gv, err := fn(raw)
+			if err != nil {
+				if le, ok := err.(*werr.LangError); ok {
+					return Value{}, le
+				}
+				return Value{}, werr.Newf(werr.CodeType,
+					"%s constructor failed for raw=%q: %v", typeName, raw, err)
+			}
+			return Value{typ: typeName, val: gv}, nil
+		}
 		return Value{}, werr.Newf(werr.CodeASTShape,
 			"unsupported typed literal type %q", typeName)
 	}

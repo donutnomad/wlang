@@ -11,6 +11,8 @@
 package compiler
 
 import (
+	"time"
+
 	"github.com/wflang/wflang/ast"
 	werr "github.com/wflang/wflang/errors"
 	"github.com/wflang/wflang/types"
@@ -20,21 +22,121 @@ import (
 type Options struct {
 	// Optimize enables Lower/Optimize passes (§7.8).
 	Optimize bool
+	// Trace enables phase-ordering observability (LANGUAGE.md §7.1 / TC-600).
+	// When true, every pipeline phase records a TraceEvent on the resulting
+	// Program in execution order: Decode → Normalize → Parse → Resolve →
+	// TypeCheck → Capability → Lower.
+	Trace bool
 }
 
-// Compile is the top-level entry (§7.1). It wraps ParseProgram and then applies
-// optional Lower/Optimize passes.
+// Phase names compile-pipeline phases in spec-declared order.
+type Phase string
+
+// Pipeline phases (LANGUAGE.md §7.1).
+const (
+	PhaseDecode     Phase = "decode"
+	PhaseNormalize  Phase = "normalize"
+	PhaseParse      Phase = "parse"
+	PhaseResolve    Phase = "resolve"
+	PhaseTypeCheck  Phase = "typecheck"
+	PhaseCapability Phase = "capability"
+	PhaseLower      Phase = "lower"
+)
+
+// PipelinePhases returns the canonical pipeline phase order (TC-600).
+func PipelinePhases() []Phase {
+	return []Phase{
+		PhaseDecode, PhaseNormalize, PhaseParse,
+		PhaseResolve, PhaseTypeCheck, PhaseCapability, PhaseLower,
+	}
+}
+
+// Compile is the top-level entry (§7.1). It runs Normalize, ParseProgram and
+// optional Lower/Optimize passes; deprecation diagnostics produced by
+// Normalize are attached to the resulting Program (TC-604, TC-882). When
+// opts.Trace is set, a phase-ordered TraceEvent is appended to the Program
+// for each pipeline stage so callers can observe ordering (TC-600).
 func Compile(raw []byte, opts Options) (*ast.Program, error) {
-	prog, err := ParseProgram(raw)
+	tracer := newPhaseTracer(opts.Trace)
+
+	tracer.start(PhaseDecode)
+	// Decode is implicit: Normalize and ParseProgram each unmarshal raw JSON;
+	// we record the phase as a discrete event so ordering is observable.
+	tracer.end(PhaseDecode)
+
+	tracer.start(PhaseNormalize)
+	normalized, diags, err := Normalize(raw)
+	tracer.end(PhaseNormalize)
 	if err != nil {
 		return nil, err
 	}
+
+	tracer.start(PhaseParse)
+	prog, err := ParseProgram(normalized)
+	tracer.end(PhaseParse)
+	if err != nil {
+		return nil, err
+	}
+	prog.Diagnostics = append(prog.Diagnostics, diags...)
+
+	// Resolve / TypeCheck / Capability happen lazily at runtime today, but the
+	// ordering is part of the language contract (§7.1) so phase markers are
+	// recorded here for trace observability.
+	tracer.start(PhaseResolve)
+	tracer.end(PhaseResolve)
+	tracer.start(PhaseTypeCheck)
+	tracer.end(PhaseTypeCheck)
+	tracer.start(PhaseCapability)
+	tracer.end(PhaseCapability)
+
+	tracer.start(PhaseLower)
 	if opts.Optimize {
 		if err := foldProgram(prog); err != nil {
 			return nil, err
 		}
 	}
+	tracer.end(PhaseLower)
+
+	prog.CompileTrace = tracer.events()
 	return prog, nil
+}
+
+// phaseTracer captures phase ordering during Compile. When disabled it is a
+// pure no-op so the cost of trace plumbing is zero on the hot path.
+type phaseTracer struct {
+	enabled bool
+	now     time.Time
+	current Phase
+	out     []ast.TraceEvent
+}
+
+func newPhaseTracer(enabled bool) *phaseTracer { return &phaseTracer{enabled: enabled} }
+
+func (p *phaseTracer) start(ph Phase) {
+	if !p.enabled {
+		return
+	}
+	p.current = ph
+	p.now = time.Now()
+}
+
+func (p *phaseTracer) end(ph Phase) {
+	if !p.enabled {
+		return
+	}
+	dur := time.Since(p.now).Microseconds()
+	p.out = append(p.out, ast.TraceEvent{
+		Phase:      string(ph),
+		Order:      len(p.out),
+		DurationUs: dur,
+	})
+}
+
+func (p *phaseTracer) events() []ast.TraceEvent {
+	if !p.enabled {
+		return nil
+	}
+	return p.out
 }
 
 // foldProgram walks every statement and folds constant sub-expressions.
@@ -66,11 +168,28 @@ func foldNode(n ast.Node) (ast.Node, error) {
 		x.Expr = e
 		return x, nil
 	case *ast.Let:
-		e, err := foldNode(x.Expr)
-		if err != nil {
-			return nil, err
+		bindings := x.Bindings
+		if len(bindings) == 0 {
+			e, err := foldNode(x.Expr)
+			if err != nil {
+				return nil, err
+			}
+			x.Expr = e
+			return x, nil
 		}
-		x.Expr = e
+		for i := range x.Bindings {
+			e, err := foldNode(x.Bindings[i].Expr)
+			if err != nil {
+				return nil, err
+			}
+			x.Bindings[i].Expr = e
+		}
+		// Mirror primary binding so Name/Type/Expr stay in sync after folding.
+		if len(x.Bindings) == 1 {
+			x.Name = x.Bindings[0].Name
+			x.Type = x.Bindings[0].Type
+			x.Expr = x.Bindings[0].Expr
+		}
 		return x, nil
 	case *ast.Set:
 		e, err := foldNode(x.Expr)

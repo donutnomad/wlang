@@ -221,6 +221,8 @@ func parseNodeWithKey(key string, body any, path string) (ast.Node, error) {
 		return parseArrayLit(body, nodePath)
 	case "try":
 		return parseTry(body, nodePath)
+	case "match":
+		return parseMatch(body, nodePath)
 	}
 	// Any other key is an operator call. Args must be an array.
 	args, err := parseArgList(body, nodePath)
@@ -403,24 +405,105 @@ func parseIf(body any, path string) (ast.Node, error) {
 	return &ast.IfStmt{Base: ast.Base{P: path}, Cond: cond, Then: thenNodes, Else: elseNodes}, nil
 }
 
+// parseLet handles the three accepted shapes of `let` (LANGUAGE.md §3.4):
+//
+//  1. Untyped single binding: {"let": {"x": <expr>}}.
+//  2. Destructuring (TC-231): {"let": {"x": <expr>, "y": <expr>, ...}}.
+//  3. Typed binding (TC-232) — two equivalent forms per §3.4:
+//     a. Sibling reserved key: {"let": {"@type": T, "x": <expr>}}.
+//     b. Wrapped binding value: {"let": {"x": {"type": T, "value": <expr>}}}.
+//     Form (b) is the canonical spec form; form (a) is the legacy ergonomic
+//     form, kept working for programs already using it.
 func parseLet(body any, path string) (ast.Node, error) {
 	m, ok := body.(map[string]any)
 	if !ok {
 		return nil, werr.Newf(werr.CodeASTShape,
 			"let body must be object").WithPath(path)
 	}
-	if len(m) != 1 {
-		return nil, werr.Newf(werr.CodeASTShape,
-			"let accepts exactly one binding, got %d", len(m)).WithPath(path)
+	// Form (a): legacy `@type` sibling key applies to the (single) binding.
+	siblingType, _ := m["@type"].(string)
+
+	type binding struct {
+		name, declType string
+		raw            any
 	}
-	for name, raw := range m {
-		expr, err := parseExpr(raw, path+"/"+name)
+	bindings := make([]binding, 0, len(m))
+	for k, v := range m {
+		if k == "@type" {
+			continue
+		}
+		bindings = append(bindings, binding{name: k, declType: siblingType, raw: v})
+	}
+	if len(bindings) == 0 {
+		return nil, werr.New(werr.CodeASTShape, "let empty").WithPath(path)
+	}
+	// Deterministic order: sort bindings by name so JSON map non-determinism
+	// does not affect compile/run order. (Destructuring's spec value is the
+	// set of bindings; observable evaluation order is left-to-right by name.)
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].name < bindings[j].name })
+
+	// `@type` is only meaningful with a single binding (cannot apply one type
+	// to multiple variables). Reject the ambiguous case to keep the rule sharp.
+	if siblingType != "" && len(bindings) > 1 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			`let "@type" sibling form requires exactly one binding, got %d; `+
+				`use the per-binding {"type":..., "value":...} form for multi-let`,
+			len(bindings)).WithPath(path)
+	}
+
+	out := &ast.Let{Base: ast.Base{P: path}}
+	for _, b := range bindings {
+		bindPath := path + "/" + b.name
+		// Form (b): wrapped {"type":T, "value":expr}. Detected when the binding
+		// value is an object whose keys are exactly {"type","value"}.
+		declType := b.declType
+		raw := b.raw
+		if wrapped, ok := isTypedBindingWrapper(raw); ok {
+			declType = wrapped.typeName
+			raw = wrapped.value
+		}
+		expr, err := parseExpr(raw, bindPath)
 		if err != nil {
 			return nil, err
 		}
-		return &ast.Let{Base: ast.Base{P: path}, Name: name, Expr: expr}, nil
+		out.Bindings = append(out.Bindings, ast.LetBinding{
+			Name: b.name,
+			Type: declType,
+			Expr: expr,
+		})
 	}
-	return nil, werr.New(werr.CodeASTShape, "let empty").WithPath(path)
+	// Mirror single-binding into legacy fields for backward compatibility
+	// with consumers that read Name/Type/Expr directly.
+	if len(out.Bindings) == 1 {
+		out.Name = out.Bindings[0].Name
+		out.Type = out.Bindings[0].Type
+		out.Expr = out.Bindings[0].Expr
+	}
+	return out, nil
+}
+
+// typedBindingWrapper is the {"type":T, "value":expr} form per §3.4.
+type typedBindingWrapper struct {
+	typeName string
+	value    any
+}
+
+// isTypedBindingWrapper detects the {"type":T, "value":expr} binding form.
+// The wrapper has exactly two keys "type" (string) and "value" (any). Any
+// other shape is treated as a normal expression so that programs whose
+// bindings happen to evaluate to a {"type","value"} map (an unlikely
+// collision) continue to compile.
+func isTypedBindingWrapper(raw any) (typedBindingWrapper, bool) {
+	m, ok := raw.(map[string]any)
+	if !ok || len(m) != 2 {
+		return typedBindingWrapper{}, false
+	}
+	t, hasT := m["type"].(string)
+	v, hasV := m["value"]
+	if !hasT || !hasV || t == "" {
+		return typedBindingWrapper{}, false
+	}
+	return typedBindingWrapper{typeName: t, value: v}, true
 }
 
 func parseSet(body any, path string) (ast.Node, error) {
@@ -501,6 +584,74 @@ func parseFori(body any, path string) (ast.Node, error) {
 		return nil, err
 	}
 	return &ast.Fori{Base: ast.Base{P: path}, Var: vr, From: from, To: to, Step: step, Do: do}, nil
+}
+
+// parseMatch parses a multi-way value-equality dispatch (§14.2):
+//
+//	{"match": {
+//	   "value": <expr>,
+//	   "cases": [
+//	      {"when": <expr>, "do": [<stmt>...]},
+//	      ...
+//	   ],
+//	   "default": [<stmt>...]    // optional
+//	}}
+func parseMatch(body any, path string) (ast.Node, error) {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"match body must be object").WithPath(path)
+	}
+	rawV, ok := m["value"]
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"match.value is required").WithPath(path)
+	}
+	val, err := parseExpr(rawV, path+"/value")
+	if err != nil {
+		return nil, err
+	}
+	rawCases, _ := m["cases"].([]any)
+	if len(rawCases) == 0 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"match.cases must be non-empty").WithPath(path)
+	}
+	cases := make([]ast.MatchCase, 0, len(rawCases))
+	for i, rc := range rawCases {
+		csub := fmt.Sprintf("%s/cases/%d", path, i)
+		cm, ok := rc.(map[string]any)
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"match case must be object").WithPath(csub)
+		}
+		rawWhen, ok := cm["when"]
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"match case requires `when`").WithPath(csub)
+		}
+		when, err := parseExpr(rawWhen, csub+"/when")
+		if err != nil {
+			return nil, err
+		}
+		do, err := parseStatements(toArr(cm["do"]), csub+"/do")
+		if err != nil {
+			return nil, err
+		}
+		cases = append(cases, ast.MatchCase{When: when, Do: do})
+	}
+	var def []ast.Node
+	if rd, ok := m["default"]; ok && rd != nil {
+		def, err = parseStatements(toArr(rd), path+"/default")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &ast.Match{
+		Base:    ast.Base{P: path},
+		Value:   val,
+		Cases:   cases,
+		Default: def,
+	}, nil
 }
 
 // parseTry parses a try/catch statement: {"try": {"do":[...], "bind":"err", "catch":[...]}}.

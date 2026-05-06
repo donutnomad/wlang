@@ -4,6 +4,7 @@ package wflang
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	"github.com/wflang/wflang/ast"
 	"github.com/wflang/wflang/compiler"
@@ -43,6 +44,19 @@ type VarOptions struct {
 	Writable bool
 }
 
+// Env is the runtime environment value injected into host functions whose
+// first non-ctx parameter is wflang.Env (LANGUAGE.md §5.3 / TC-422).
+type Env = registry.Env
+
+// FuncMeta is the read-only descriptor of a registered Go function.
+type FuncMeta = registry.FuncMeta
+
+// BindOptions controls Registry.BindType (LANGUAGE.md §4.5).
+type BindOptions = registry.BindOptions
+
+// MethodOptions describes per-method overrides for BindType.
+type MethodOptions = registry.MethodOptions
+
 // CapabilitySet is a map of capability names to grants.
 type CapabilitySet map[string]bool
 
@@ -54,6 +68,14 @@ type EngineOptions struct {
 	Capabilities CapabilitySet
 	// Optimize enables compiler Lower/Optimize passes (§7.8).
 	Optimize bool
+	// Features is the runtime-flag set used to gate experimental syntax /
+	// builtins (LANGUAGE.md §13.3 / TC-884). The default behavior treats
+	// every feature as enabled; turning a key to false disables it.
+	Features map[string]bool
+	// Trace enables compile-phase trace observability (LANGUAGE.md §7.1 /
+	// TC-600). Compiled programs expose the recorded phases via
+	// Program.CompileTrace().
+	Trace bool
 }
 
 // RunOptions configures a single program Run.
@@ -70,6 +92,12 @@ type SessionOptions struct {
 	Packages            map[string]PackageSpec
 	RoutineYieldHandler func(ctx context.Context, y YieldState)
 	RoutineErrorHandler func(ctx context.Context, err error)
+	// Lang declares the wflang language version of this session
+	// (LANGUAGE.md §3.1). Defaults to "wflang/v1" when empty.
+	Lang string
+	// Imports declares the initial import set; subsequent envelope
+	// fragments take the union with this set (TC-159).
+	Imports []string
 }
 
 // YieldError is a Go error that a host function returns from inside a routine
@@ -137,18 +165,217 @@ func NewEngine(opts EngineOptions) *Engine {
 
 // CompileJSON compiles a JSON AST into a reusable Program.
 func (e *Engine) CompileJSON(data []byte) (*Program, error) {
-	prog, err := compiler.Compile(data, compiler.Options{Optimize: e.opts.Optimize})
+	prog, err := compiler.Compile(data, compiler.Options{
+		Optimize: e.opts.Optimize,
+		Trace:    e.opts.Trace,
+	})
 	if err != nil {
+		return nil, err
+	}
+	if err := checkFeatures(prog, e.opts.Features); err != nil {
+		return nil, err
+	}
+	// Static type checks (LANGUAGE.md §7.5 / TC-644, TC-653). Strict mode
+	// (TC-401) flips the checker into multi-error aggregation (TC-732) so
+	// callers see every diagnostic in one shot via *errors.List.
+	if err := compiler.TypeCheckOpts(prog, e.opts.Registry, compiler.TypeCheckOptions{
+		Aggregate: e.opts.Strict,
+	}); err != nil {
 		return nil, err
 	}
 	return &Program{engine: e, prog: prog}, nil
 }
+
+// featureEnabled returns true unless the named feature is explicitly disabled.
+func featureEnabled(feats map[string]bool, name string) bool {
+	if feats == nil {
+		return true
+	}
+	v, ok := feats[name]
+	if !ok {
+		return true
+	}
+	return v
+}
+
+// checkFeatures walks the compiled program and rejects use of disabled
+// features (LANGUAGE.md §13.3 / TC-884). Currently gated features:
+//   - "typedArray": when false, `array<T>` typed literals are rejected.
+func checkFeatures(prog *ast.Program, feats map[string]bool) error {
+	if feats == nil {
+		return nil
+	}
+	if !featureEnabled(feats, "typedArray") {
+		var bad string
+		var path string
+		var walk func(n ast.Node) bool
+		walk = func(n ast.Node) bool {
+			if n == nil {
+				return false
+			}
+			if lit, ok := n.(*ast.Literal); ok {
+				name := lit.Value.TypeName()
+				if len(name) > 6 && name[:6] == "array<" {
+					bad = name
+					path = lit.Path()
+					return true
+				}
+			}
+			if a, ok := n.(*ast.Array); ok {
+				bad = "array<" + a.Elem + ">"
+				path = a.Path()
+				return true
+			}
+			stop := false
+			astWalkChildren(n, func(c ast.Node) {
+				if stop {
+					return
+				}
+				if walk(c) {
+					stop = true
+				}
+			})
+			return stop
+		}
+		for _, s := range prog.Body {
+			if walk(s) {
+				return werr.Newf(werr.CodeASTShape,
+					"feature typedArray=false: %s not allowed", bad).WithPath(path)
+			}
+		}
+	}
+	return nil
+}
+
+// astWalkChildren is a tiny external mirror of toolchain.walkChildren so that
+// wflang.go can perform AST traversal without importing toolchain from itself.
+func astWalkChildren(n ast.Node, fn func(ast.Node)) {
+	switch x := n.(type) {
+	case *ast.Var:
+		if x.Default != nil {
+			fn(x.Default)
+		}
+	case *ast.Array:
+		for _, it := range x.Items {
+			fn(it)
+		}
+	case *ast.IfStmt:
+		fn(x.Cond)
+		for _, s := range x.Then {
+			fn(s)
+		}
+		for _, s := range x.Else {
+			fn(s)
+		}
+	case *ast.IfExpr:
+		fn(x.Cond)
+		for _, s := range x.Then {
+			fn(s)
+		}
+		for _, s := range x.Else {
+			fn(s)
+		}
+	case *ast.Call:
+		for _, a := range x.Args {
+			fn(a)
+		}
+	case *ast.Let:
+		if len(x.Bindings) > 0 {
+			for _, b := range x.Bindings {
+				fn(b.Expr)
+			}
+		} else {
+			fn(x.Expr)
+		}
+	case *ast.Set:
+		fn(x.Expr)
+	case *ast.Return:
+		fn(x.Expr)
+	case *ast.ExprStmt:
+		fn(x.Expr)
+	case *ast.Panic:
+		fn(x.Expr)
+	case *ast.Routine:
+		fn(x.Call)
+	case *ast.Foreach:
+		fn(x.Target)
+		for _, s := range x.Do {
+			fn(s)
+		}
+	case *ast.Fori:
+		fn(x.From)
+		fn(x.To)
+		if x.Step != nil {
+			fn(x.Step)
+		}
+		for _, s := range x.Do {
+			fn(s)
+		}
+	case *ast.Try:
+		for _, s := range x.Do {
+			fn(s)
+		}
+		for _, s := range x.Catch {
+			fn(s)
+		}
+	case *ast.Match:
+		fn(x.Value)
+		for _, c := range x.Cases {
+			fn(c.When)
+			for _, s := range c.Do {
+				fn(s)
+			}
+		}
+		for _, s := range x.Default {
+			fn(s)
+		}
+	}
+}
+
+// Diagnostic is re-exported from ast for the public surface.
+type Diagnostic = ast.Diagnostic
+
+// Deprecation is re-exported for migration tooling.
+type Deprecation = compiler.Deprecation
+
+// DeprecationTable lists every legacy AST form recognised by the compiler
+// migrator (LANGUAGE.md §13.2 / TC-882).
+func DeprecationTable() []Deprecation { return compiler.DeprecationTable() }
+
+// Migrate rewrites a legacy program JSON into the current AST form and
+// returns the applied deprecation diagnostics (LANGUAGE.md §13.2 / TC-883).
+func Migrate(raw []byte) ([]byte, []Diagnostic, error) { return compiler.Migrate(raw) }
 
 // Program is a compiled program.
 type Program struct {
 	engine *Engine
 	prog   *ast.Program
 }
+
+// Diagnostics returns the compile-time deprecation/warning notices attached
+// to this program (LANGUAGE.md §13.2 / TC-604).
+func (p *Program) Diagnostics() []Diagnostic {
+	if p.prog == nil {
+		return nil
+	}
+	out := make([]Diagnostic, len(p.prog.Diagnostics))
+	copy(out, p.prog.Diagnostics)
+	return out
+}
+
+// CompileTrace returns the ordered phase events recorded during compilation
+// (LANGUAGE.md §7.1 / TC-600). Empty when EngineOptions.Trace was not set.
+func (p *Program) CompileTrace() []ast.TraceEvent {
+	if p.prog == nil {
+		return nil
+	}
+	out := make([]ast.TraceEvent, len(p.prog.CompileTrace))
+	copy(out, p.prog.CompileTrace)
+	return out
+}
+
+// CompilePhases returns the canonical pipeline phase order (TC-600).
+func CompilePhases() []compiler.Phase { return compiler.PipelinePhases() }
 
 // Run executes the program.
 func (p *Program) Run(ctx context.Context, opts RunOptions) (Value, error) {
@@ -161,6 +388,7 @@ func (p *Program) Run(ctx context.Context, opts RunOptions) (Value, error) {
 	if len(opts.Packages) > 0 {
 		reg = withPackages(reg, opts.Packages)
 	}
+	ctx = registry.WithCapabilities(ctx, p.engine.opts.Capabilities)
 	exec := runtime.NewExecutor(ctx, scope, reg, availablePkgNames(reg), p.engine.opts.Budget)
 	return exec.RunProgram(p.prog)
 }
@@ -175,6 +403,14 @@ func (e *Engine) NewSession(opts SessionOptions) (*Session, error) {
 	if len(opts.Packages) > 0 {
 		reg = withPackages(reg, opts.Packages)
 	}
+	lang := opts.Lang
+	if lang == "" {
+		lang = "wflang/v1"
+	}
+	imports := map[string]bool{}
+	for _, im := range opts.Imports {
+		imports[im] = true
+	}
 	return &Session{
 		engine:   e,
 		scope:    scope,
@@ -182,6 +418,9 @@ func (e *Engine) NewSession(opts SessionOptions) (*Session, error) {
 		finished: false,
 		onErr:    opts.RoutineErrorHandler,
 		onYield:  opts.RoutineYieldHandler,
+		yields:   map[string]*pendingYield{},
+		lang:     lang,
+		imports:  imports,
 	}, nil
 }
 
@@ -194,6 +433,52 @@ type Session struct {
 	result   Value
 	onErr    func(ctx context.Context, err error)
 	onYield  func(ctx context.Context, y YieldState)
+
+	yieldMu sync.Mutex
+	yields  map[string]*pendingYield
+
+	metaMu  sync.Mutex
+	lang    string
+	imports map[string]bool
+}
+
+// Lang reports the session's wflang language version (§3.1).
+func (s *Session) Lang() string {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	return s.lang
+}
+
+// Imports returns the session's current import set, sorted (§3.1 / TC-159).
+func (s *Session) Imports() []string {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	out := make([]string, 0, len(s.imports))
+	for k := range s.imports {
+		out = append(out, k)
+	}
+	sortStrings(out)
+	return out
+}
+
+// sortStrings is a tiny in-place sort to avoid importing "sort" at the top
+// of this already-busy file.
+func sortStrings(a []string) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j-1] > a[j]; j-- {
+			a[j-1], a[j] = a[j], a[j-1]
+		}
+	}
+}
+
+// pendingYield is the suspended-routine record indexed by yield Token.
+// It captures everything needed to validate and synthesize the resumed
+// value (LANGUAGE.md §8.2 / TC-704).
+type pendingYield struct {
+	token       string
+	path        string
+	returnTypes []string
+	used        bool
 }
 
 // AppendRun compiles and executes one or more additional statements.
@@ -213,16 +498,30 @@ func (s *Session) AppendRun(ctx context.Context, data []byte) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
+	// LANGUAGE.md §3.1: envelope `lang` must agree with the session's
+	// language version; `imports` are merged via union (TC-158/TC-159).
+	if envIsEnvelope(body) {
+		if prog.Lang != "" && prog.Lang != s.lang {
+			return Value{}, werr.Newf(werr.CodeLangVersionConflct,
+				"session lang=%s but envelope declares %s", s.lang, prog.Lang)
+		}
+		if err := s.mergeImports(prog.Imports); err != nil {
+			return Value{}, err
+		}
+	}
+	ctx = registry.WithCapabilities(ctx, s.engine.opts.Capabilities)
 	exec := runtime.NewExecutor(ctx, s.scope, s.reg,
 		availablePkgNames(s.reg), s.engine.opts.Budget)
 	// Bridge SessionOptions handlers → Executor routine handlers (§5.2 / §8).
 	var rtErr runtime.RoutineErrorHandler
-	var rtYield runtime.RoutineYieldHandler
 	if s.onErr != nil {
 		rtErr = func(ctx context.Context, e error) { s.onErr(ctx, e) }
 	}
-	if s.onYield != nil {
-		rtYield = func(ctx context.Context, y runtime.RoutineYieldReport) {
+	// Always install a yield handler so the Session can register the slot
+	// for ResumeYield, even when the caller provided no user handler.
+	rtYield := func(ctx context.Context, y runtime.RoutineYieldReport) {
+		s.registerYield(y)
+		if s.onYield != nil {
 			s.onYield(ctx, YieldState{
 				Token:       y.Token,
 				Path:        y.Path,
@@ -230,9 +529,7 @@ func (s *Session) AppendRun(ctx context.Context, data []byte) (Value, error) {
 			})
 		}
 	}
-	if rtErr != nil || rtYield != nil {
-		exec.SetRoutineHandlers(rtErr, rtYield)
-	}
+	exec.SetRoutineHandlers(rtErr, rtYield)
 	v, err := exec.RunProgram(prog)
 	if err != nil {
 		return Value{}, err
@@ -243,6 +540,120 @@ func (s *Session) AppendRun(ctx context.Context, data []byte) (Value, error) {
 		s.result = v
 	}
 	return v, nil
+}
+
+// envIsEnvelope reports whether the (whitespace-trimmed) JSON payload begins
+// with a `{...}` map shape, which is how envelope payloads are identified
+// before parsing.
+func envIsEnvelope(body []byte) bool {
+	for _, c := range body {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// mergeImports unions the envelope's imports into the session import set.
+// Re-importing the same name is silently idempotent. (LANGUAGE.md §3.1
+// reserves "冲突项报错"; with current `imports = []string` semantics no
+// version-conflict surface exists, so duplicates are pure no-ops.)
+func (s *Session) mergeImports(imps []string) error {
+	if len(imps) == 0 {
+		return nil
+	}
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	for _, im := range imps {
+		if im == "" {
+			continue
+		}
+		s.imports[im] = true
+	}
+	return nil
+}
+
+// registerYield records a suspended routine slot. Token uniqueness within a
+// session is enforced (LANGUAGE.md §8.1 / TC-701). If the same token is
+// observed twice the second registration is silently ignored — the first
+// slot wins, and a later ResumeYield with that token resumes the original.
+func (s *Session) registerYield(y runtime.RoutineYieldReport) {
+	if y.Token == "" {
+		return
+	}
+	s.yieldMu.Lock()
+	defer s.yieldMu.Unlock()
+	if _, exists := s.yields[y.Token]; exists {
+		return
+	}
+	s.yields[y.Token] = &pendingYield{
+		token:       y.Token,
+		path:        y.Path,
+		returnTypes: append([]string(nil), y.ReturnTypes...),
+	}
+}
+
+// ResumeYield delivers a ResumeInput to a suspended routine identified by
+// Token. Implements LANGUAGE.md §5.2 / §8.3:
+//
+//   - unknown / used token  → E_YIELD_TOKEN_MISMATCH
+//   - Err set               → routine call surfaces it as a host error
+//   - len(Results)==0       → null typed value
+//   - single Result         → single typed value (after type check)
+//   - multiple Results      → tuple<T1,T2,...>
+//
+// The returned Value is what the routine "would have received" as the
+// host call's continuation result. Type validation against ReturnTypes
+// follows §5.4 (auto host type names supported, TC-708).
+func (s *Session) ResumeYield(input ResumeInput) (Value, error) {
+	s.yieldMu.Lock()
+	slot, ok := s.yields[input.Token]
+	if !ok || slot.used {
+		s.yieldMu.Unlock()
+		return Value{}, werr.Newf(werr.CodeYieldTokenMismatch,
+			"unknown or already-used yield token %q", input.Token)
+	}
+	slot.used = true
+	rtypes := append([]string(nil), slot.returnTypes...)
+	path := slot.path
+	s.yieldMu.Unlock()
+
+	if input.Err != nil {
+		le := werr.Newf(werr.CodeHost, "resume error: %v", input.Err).WithPath(path)
+		le.Cause = input.Err
+		return Value{}, le
+	}
+	// Validate Results vs ReturnTypes.
+	if len(rtypes) == 0 && len(input.Results) == 0 {
+		v, _ := types.NewNull()
+		return v, nil
+	}
+	if len(input.Results) != len(rtypes) {
+		return Value{}, werr.Newf(werr.CodeType,
+			"resume: expected %d result(s) for %v, got %d",
+			len(rtypes), rtypes, len(input.Results)).WithPath(path)
+	}
+	for i, want := range rtypes {
+		got := input.Results[i].TypeName()
+		if got != want && !input.Results[i].IsNull() {
+			return Value{}, werr.Newf(werr.CodeType,
+				"resume: result %d: want %s, got %s", i, want, got).WithPath(path)
+		}
+	}
+	if len(input.Results) == 1 {
+		return input.Results[0], nil
+	}
+	tupleName := types.TupleType(rtypes)
+	raw := make([]any, len(input.Results))
+	for i, r := range input.Results {
+		raw[i] = r.Go()
+	}
+	return types.NewValue(tupleName, raw), nil
 }
 
 // toStatementArray ensures the input is wrapped as `[...]` for ParseProgram.

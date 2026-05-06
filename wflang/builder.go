@@ -3,6 +3,7 @@ package wflang
 import (
 	"encoding/json"
 
+	"github.com/wflang/wflang/compiler"
 	werr "github.com/wflang/wflang/errors"
 )
 
@@ -50,6 +51,18 @@ func (b *ConfigBuilder) Call(recv Node, op string, args ...Node) Node {
 		all = append(all, a)
 	}
 	return map[string]any{op: all}
+}
+
+// CallE is the validating variant of Call (LANGUAGE.md §5.6 / TC-464). When
+// the builder is bound to a Registry, CallE rejects operators that are
+// neither builtin nor registered, returning an E_SYMBOL error before the
+// program ever reaches CompileJSON.
+func (b *ConfigBuilder) CallE(recv Node, op string, args ...Node) (Node, error) {
+	if !compiler.IsBuiltinOperator(op) && b.reg != nil && !b.reg.HasOperator(op) {
+		return nil, werr.Newf(werr.CodeSymbol,
+			"builder: unknown operator %q (not a builtin and not registered)", op)
+	}
+	return b.Call(recv, op, args...), nil
 }
 
 // ProgramBuilder accumulates statements for a program body.
