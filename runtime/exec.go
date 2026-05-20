@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -674,31 +675,93 @@ func extractArrayItems(v types.Value) ([]any, string, bool) {
 // ProgramContainsReturn reports whether the program's top-level body has any
 // `return` statement (used by Session to decide session completion).
 func ProgramContainsReturn(p *ast.Program) bool {
-	for _, s := range p.Body {
-		if containsReturn(s) {
+	return containsReturnList(p.Body)
+}
+
+// containsReturn recursively walks a wflang AST node looking for a `return`
+// statement reachable from the program's own evaluation (i.e. not behind a
+// child-routine boundary). Routine.Body is intentionally skipped because a
+// return inside a `routine.do` block resolves that routine's handle and does
+// not end the enclosing program (LANGUAGE.md §3.3 / runtime/exec.go
+// execRoutine body form).
+func containsReturn(n ast.Node) bool {
+	switch x := n.(type) {
+	case nil:
+		return false
+	case *ast.Return:
+		return true
+	case *ast.IfStmt:
+		return containsReturnList(x.Then) || containsReturnList(x.Else)
+	case *ast.IfExpr:
+		return containsReturnList(x.Then) || containsReturnList(x.Else)
+	case *ast.Foreach:
+		return containsReturnList(x.Do)
+	case *ast.Fori:
+		return containsReturnList(x.Do)
+	case *ast.Match:
+		if slices.ContainsFunc(x.Cases, func(c ast.MatchCase) bool {
+			return containsReturnList(c.Do)
+		}) {
 			return true
+		}
+		return containsReturnList(x.Default)
+	case *ast.SelectStmt:
+		if slices.ContainsFunc(x.Cases, func(c ast.SelectCase) bool {
+			return containsReturnList(c.Do)
+		}) {
+			return true
+		}
+		return containsReturnList(x.Default)
+	case *ast.Let:
+		for _, b := range x.Bindings {
+			if containsReturn(b.Expr) {
+				return true
+			}
+		}
+		return containsReturn(x.Expr)
+	case *ast.Set:
+		return containsReturn(x.Expr)
+	case *ast.ExprStmt:
+		return containsReturn(x.Expr)
+	case *ast.Panic:
+		return containsReturn(x.Expr)
+	case *ast.Call:
+		return containsReturnList(x.Args)
+	case *ast.Array:
+		return containsReturnList(x.Items)
+	case *ast.MapLit:
+		for _, e := range x.Entries {
+			if containsReturn(e.Key) || containsReturn(e.Val) {
+				return true
+			}
+		}
+	case *ast.StructLit:
+		for _, f := range x.Fields {
+			if containsReturn(f.Expr) {
+				return true
+			}
+		}
+	case *ast.ChanLit:
+		return containsReturn(x.Buffer)
+	case *ast.Var:
+		return containsReturn(x.Default)
+	case *ast.Routine:
+		// Routine.Body is a child-routine boundary: a `return` there resolves
+		// the routine handle, it does not end the enclosing program. Only the
+		// Call form's argument expressions can carry a program-level return.
+		if x.Call != nil {
+			return containsReturn(x.Call)
+		}
+	case *ast.Defer:
+		if x.Call != nil {
+			return containsReturn(x.Call)
 		}
 	}
 	return false
 }
 
-func containsReturn(n ast.Node) bool {
-	switch x := n.(type) {
-	case *ast.Return:
-		return true
-	case *ast.IfStmt:
-		for _, s := range x.Then {
-			if containsReturn(s) {
-				return true
-			}
-		}
-		for _, s := range x.Else {
-			if containsReturn(s) {
-				return true
-			}
-		}
-	}
-	return false
+func containsReturnList(ns []ast.Node) bool {
+	return slices.ContainsFunc(ns, containsReturn)
 }
 
 // RunProgram executes a full program and returns the program's result value.

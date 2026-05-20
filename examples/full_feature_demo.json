@@ -1,0 +1,642 @@
+{
+  "lang": "wflang/v1",
+  "imports": [
+    "arr",
+    "audit",
+    "ch",
+    "demo",
+    "m",
+    "num",
+    "str",
+    "to",
+    "val",
+    "worker"
+  ],
+  "program": [
+    {
+      "let": {
+        "title": {
+          "literal": {
+            "type": "string",
+            "value": "full feature demo"
+          }
+        }
+      }
+    },
+    {
+      "defer": {
+        "Close": [
+          {
+            "pkg": "audit"
+          },
+          {
+            "var": "title"
+          }
+        ]
+      }
+    },
+    {
+      "let": {
+        "user": {
+          "struct": [
+            "demo.User",
+            {
+              "Name": {
+                "literal": {
+                  "type": "string",
+                  "value": "alice"
+                }
+              },
+              "Age": {
+                "literal": {
+                  "type": "int64",
+                  "value": "29"
+                }
+              },
+              "Active": {
+                "literal": {
+                  "type": "boolean",
+                  "value": true
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "let": {
+        "scores": {
+          "array": {
+            "elem": "int64",
+            "items": [
+              {
+                "literal": {
+                  "type": "int64",
+                  "value": "3"
+                }
+              },
+              {
+                "literal": {
+                  "type": "int64",
+                  "value": "5"
+                }
+              },
+              {
+                "literal": {
+                  "type": "int64",
+                  "value": "8"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "let": {
+        "total": {
+          "literal": {
+            "type": "int64",
+            "value": "0"
+          }
+        }
+      }
+    },
+    {
+      "foreach": {
+        "target": {
+          "var": "scores"
+        },
+        "as": "score",
+        "index": "i",
+        "do": [
+          {
+            "if": {
+              "cond": {
+                ">": [
+                  {
+                    "var": "score"
+                  },
+                  {
+                    "literal": {
+                      "type": "int64",
+                      "value": "0"
+                    }
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "set": {
+                    "total": {
+                      "+": [
+                        {
+                          "var": "total"
+                        },
+                        {
+                          "var": "score"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "continue": true
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "fori": {
+        "var": "bonus",
+        "from": {
+          "literal": {
+            "type": "int64",
+            "value": "0"
+          }
+        },
+        "to": {
+          "literal": {
+            "type": "int64",
+            "value": "3"
+          }
+        },
+        "step": {
+          "literal": {
+            "type": "int64",
+            "value": "1"
+          }
+        },
+        "do": [
+          {
+            "set": {
+              "total": {
+                "+": [
+                  {
+                    "var": "total"
+                  },
+                  {
+                    "var": "bonus"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "let": [
+        [
+          "risk",
+          "riskErr"
+        ],
+        [
+          "int64",
+          "error"
+        ],
+        {
+          "Score": [
+            {
+              "pkg": "demo"
+            },
+            {
+              "var": "user"
+            },
+            {
+              "var": "total"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "let": {
+        "riskStatus": {
+          "match": {
+            "value": {
+              ">=": [
+                {
+                  "var": "risk"
+                },
+                {
+                  "literal": {
+                    "type": "int64",
+                    "value": "10"
+                  }
+                }
+              ]
+            },
+            "cases": [
+              {
+                "when": {
+                  "literal": {
+                    "type": "boolean",
+                    "value": true
+                  }
+                },
+                "do": [
+                  {
+                    "return": {
+                      "literal": {
+                        "type": "string",
+                        "value": "high"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "when": {
+                  "literal": {
+                    "type": "boolean",
+                    "value": false
+                  }
+                },
+                "do": [
+                  {
+                    "return": {
+                      "literal": {
+                        "type": "string",
+                        "value": "normal"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "default": [
+              {
+                "return": {
+                  "literal": {
+                    "type": "string",
+                    "value": "unknown"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "let": {
+        "labels": {
+          "map": {
+            "type": [
+              "string",
+              "string"
+            ],
+            "value": {
+              "owner": {
+                "literal": {
+                  "type": "string",
+                  "value": "platform"
+                }
+              },
+              "tier": {
+                "literal": {
+                  "type": "string",
+                  "value": "gold"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "expr": {
+        "m.set": [
+          {
+            "var": "labels"
+          },
+          {
+            "literal": {
+              "type": "string",
+              "value": "risk"
+            }
+          },
+          {
+            "var": "riskStatus"
+          }
+        ]
+      }
+    },
+    {
+      "let": [
+        [
+          "riskLabel",
+          "riskLabelOK"
+        ],
+        [
+          "string",
+          "boolean"
+        ],
+        {
+          "m.get": [
+            {
+              "var": "labels"
+            },
+            {
+              "literal": {
+                "type": "string",
+                "value": "risk"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "let": {
+        "labelKeys": {
+          "m.keys": [
+            {
+              "var": "labels"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "let": {
+        "labelCount": {
+          "m.len": [
+            {
+              "var": "labels"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "expr": {
+        "m.del": [
+          {
+            "var": "labels"
+          },
+          {
+            "literal": {
+              "type": "string",
+              "value": "owner"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "let": {
+        "events": {
+          "chan": [
+            "string",
+            {
+              "literal": {
+                "type": "int64",
+                "value": "1"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "expr": {
+        "ch.send": [
+          {
+            "var": "events"
+          },
+          {
+            "literal": {
+              "type": "string",
+              "value": "ready"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "select": [
+        {
+          "case": {
+            "recv": [
+              {
+                "var": "events"
+              }
+            ],
+            "bind": [
+              "event",
+              "eventOK"
+            ],
+            "do": [
+              {
+                "set": {
+                  "title": {
+                    "+": [
+                      {
+                        "var": "title"
+                      },
+                      {
+                        "literal": {
+                          "type": "string",
+                          "value": ":"
+                        }
+                      },
+                      {
+                        "var": "event"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "default": [
+            {
+              "set": {
+                "title": {
+                  "literal": {
+                    "type": "string",
+                    "value": "idle"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "let": {
+        "workerResult": {
+          "routine": {
+            "do": [
+              {
+                "let": [
+                  [
+                    "value",
+                    "_"
+                  ],
+                  [
+                    "string",
+                    "error"
+                  ],
+                  {
+                    "Echo": [
+                      {
+                        "pkg": "worker"
+                      },
+                      {
+                        "literal": {
+                          "type": "string",
+                          "value": "async"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "return": {
+                  "var": "value"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "let": {
+        "legacyRoutine": {
+          "routine": {
+            "Echo": [
+              {
+                "pkg": "worker"
+              },
+              {
+                "literal": {
+                  "type": "string",
+                  "value": "legacy"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "let": {
+        "asyncValue": {
+          "await": {
+            "var": "workerResult"
+          }
+        }
+      }
+    },
+    {
+      "let": [
+        [
+          "legacyValue",
+          "legacyErr"
+        ],
+        [
+          "string",
+          "error"
+        ],
+        {
+          "await": {
+            "var": "legacyRoutine"
+          }
+        }
+      ]
+    },
+    {
+      "expr": {
+        "ch.close": [
+          {
+            "var": "events"
+          }
+        ]
+      }
+    },
+    {
+      "let": [
+        [
+          "afterClose",
+          "afterCloseOK"
+        ],
+        [
+          "string",
+          "boolean"
+        ],
+        {
+          "ch.recv": [
+            {
+              "var": "events"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "return": {
+        "struct": [
+          "demo.Report",
+          {
+            "Title": {
+              "var": "title"
+            },
+            "User": {
+              "var": "user"
+            },
+            "Risk": {
+              "var": "risk"
+            },
+            "RiskError": {
+              "var": "riskErr"
+            },
+            "RiskLabel": {
+              "var": "riskLabel"
+            },
+            "RiskLabelOK": {
+              "var": "riskLabelOK"
+            },
+            "Labels": {
+              "var": "labels"
+            },
+            "LabelKeys": {
+              "var": "labelKeys"
+            },
+            "LabelCount": {
+              "var": "labelCount"
+            },
+            "AsyncValue": {
+              "var": "asyncValue"
+            },
+            "LegacyValue": {
+              "var": "legacyValue"
+            },
+            "LegacyError": {
+              "var": "legacyErr"
+            },
+            "AfterClose": {
+              "var": "afterClose"
+            },
+            "AfterCloseOK": {
+              "var": "afterCloseOK"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

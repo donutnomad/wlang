@@ -549,10 +549,19 @@ func looksLikeEnvelope(b []byte) bool {
 	return false
 }
 
-// MustValue panics on NewLiteral error; convenience helper.
+// MustValue constructs a Value without validation; convenience helper that
+// wraps an arbitrary Go carrier under the given language type name.
 func MustValue(typeName string, raw any) Value {
-	v, err := types.NewValue(typeName, raw), error(nil)
-	_ = err
+	return types.NewValue(typeName, raw)
+}
+
+// MustLiteral parses a typed-literal string via types.NewLiteral and panics on
+// error. Convenience helper for tests where the raw form is known good.
+func MustLiteral(typeName, raw string) Value {
+	v, err := types.NewLiteral(typeName, raw)
+	if err != nil {
+		panic(err)
+	}
 	return v
 }
 
