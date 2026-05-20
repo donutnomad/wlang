@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -13,8 +14,10 @@ func main() {
 	funcName := flag.String("func", "", "top-level Go function to translate")
 	lang := flag.String("lang", "wflang/v1", "wlang language version")
 	pseudo := flag.Bool("pseudo", false, "print pseudocode instead of JSON")
+	manifest := flag.String("manifest", "", "write package import manifest JSON to this path")
+	embedImportMap := flag.Bool("embed-import-map", false, "embed package import map in JSON output")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: go2wl -func Name [-pseudo] [file]\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: go2wl -func Name [-pseudo] [-manifest path] [-embed-import-map] [file]\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -26,19 +29,28 @@ func main() {
 		fmt.Fprintln(os.Stderr, "go2wl: expected exactly one Go source file")
 		os.Exit(1)
 	}
-	src, err := os.ReadFile(flag.Arg(0))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "go2wl:", err)
-		os.Exit(1)
-	}
-	out, err := go2wlang.TranslateFile(src, go2wlang.Options{
-		FuncName: *funcName,
-		Lang:     *lang,
+	result, err := go2wlang.TranslateFilePathDetailed(flag.Arg(0), go2wlang.Options{
+		FuncName:       *funcName,
+		Lang:           *lang,
+		EmbedImportMap: *embedImportMap,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "go2wl:", err)
 		os.Exit(1)
 	}
+	if *manifest != "" {
+		raw, err := json.MarshalIndent(result.Imports, "", "  ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "go2wl:", err)
+			os.Exit(1)
+		}
+		raw = append(raw, '\n')
+		if err := os.WriteFile(*manifest, raw, 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "go2wl: write manifest %s: %v\n", *manifest, err)
+			os.Exit(1)
+		}
+	}
+	out := result.JSON
 	if *pseudo {
 		out, err = wflang.FormatPseudoCode(out)
 		if err != nil {

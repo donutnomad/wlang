@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	gotypes "go/types"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,20 +19,71 @@ import (
 
 // Options configures Go to wlang translation.
 type Options struct {
-	FuncName       string
-	PackageAliases map[string]string
-	Lang           string
-	Imports        []string
+	FuncName         string
+	PackageAliases   map[string]string
+	Lang             string
+	Imports          []string
+	Filename         string
+	Dir              string
+	EmbedImportMap   bool
+	LocalPackageName string
+}
+
+// Result contains generated wlang JSON and metadata useful for storage.
+type Result struct {
+	JSON     []byte
+	Imports  map[string]string
+	FuncName string
+	Source   string
+}
+
+// TranslateFilePath reads a Go source file and translates one named top-level
+// function into a wlang JSON program envelope. The source file directory is
+// used as the type-checking context so project-local imports can be resolved.
+func TranslateFilePath(filename string, opts Options) ([]byte, error) {
+	result, err := TranslateFilePathDetailed(filename, opts)
+	if err != nil {
+		return nil, err
+	}
+	return result.JSON, nil
+}
+
+// TranslateFilePathDetailed reads a Go source file and translates one named
+// top-level function into a wlang JSON program envelope plus metadata.
+func TranslateFilePathDetailed(filename string, opts Options) (*Result, error) {
+	src, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	opts.Filename = filename
+	if opts.Dir == "" {
+		opts.Dir = filepath.Dir(filename)
+	}
+	return TranslateFileDetailed(src, opts)
 }
 
 // TranslateFile translates one named top-level Go function into a wlang JSON
 // program envelope.
 func TranslateFile(src []byte, opts Options) ([]byte, error) {
+	result, err := TranslateFileDetailed(src, opts)
+	if err != nil {
+		return nil, err
+	}
+	return result.JSON, nil
+}
+
+// TranslateFileDetailed translates one named top-level Go function into a
+// wlang JSON program envelope plus metadata.
+func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 	if opts.FuncName == "" {
 		return nil, fmt.Errorf("FuncName is required")
 	}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "input.go", src, 0)
+	filename := opts.Filename
+	if filename == "" {
+		filename = "input.go"
+	}
+	file, err := parser.ParseFile(fset, filename, src, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -37,18 +92,20 @@ func TranslateFile(src []byte, opts Options) ([]byte, error) {
 		return nil, fmt.Errorf("function %s not found", opts.FuncName)
 	}
 	t := &translator{
-		fset:    fset,
-		file:    file,
-		imports: importAliases(file),
-		locals:  map[string]bool{},
+		fset:             fset,
+		file:             file,
+		imports:          importAliases(file, opts.Dir),
+		locals:           newLocalScopes(),
+		localPackageName: localPackageName(file, opts),
 	}
+	t.info = typeInfoForFile(fset, file, opts.Dir)
 	for k, v := range opts.PackageAliases {
 		t.imports[k] = v
 	}
 	if fn.Type.Params != nil {
 		for _, field := range fn.Type.Params.List {
 			for _, name := range field.Names {
-				t.locals[name.Name] = true
+				t.locals.add(name.Name)
 			}
 		}
 	}
@@ -71,19 +128,99 @@ func TranslateFile(src []byte, opts Options) ([]byte, error) {
 	if len(imports) > 0 {
 		env["imports"] = imports
 	}
+	importMap := usedImportMap(imports, t.imports)
+	if opts.EmbedImportMap && len(importMap) > 0 {
+		env["importMap"] = importMap
+	}
 	raw, err := json.Marshal(env)
 	if err != nil {
 		return nil, err
 	}
-	return wflang.FormatJSON(raw)
+	formatted, err := wflang.FormatJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		JSON:     formatted,
+		Imports:  importMap,
+		FuncName: opts.FuncName,
+		Source:   filename,
+	}, nil
 }
 
 type translator struct {
-	fset        *token.FileSet
-	file        *ast.File
-	imports     map[string]string
-	usedImports map[string]bool
-	locals      map[string]bool
+	fset             *token.FileSet
+	file             *ast.File
+	info             *gotypes.Info
+	imports          map[string]string
+	usedImports      map[string]bool
+	locals           *localScopes
+	localPackageName string
+}
+
+type localScopes struct {
+	frames []map[string]bool
+}
+
+func newLocalScopes() *localScopes {
+	return &localScopes{frames: []map[string]bool{{}}}
+}
+
+func (s *localScopes) push() {
+	s.frames = append(s.frames, map[string]bool{})
+}
+
+func (s *localScopes) pop() {
+	if len(s.frames) > 1 {
+		s.frames = s.frames[:len(s.frames)-1]
+	}
+}
+
+func (s *localScopes) add(name string) {
+	if name == "" || name == "_" {
+		return
+	}
+	s.frames[len(s.frames)-1][name] = true
+}
+
+func (s *localScopes) has(name string) bool {
+	for i := len(s.frames) - 1; i >= 0; i-- {
+		if s.frames[i][name] {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *localScopes) withFrame(fn func() error) error {
+	s.push()
+	defer s.pop()
+	return fn()
+}
+
+func typeInfoForFile(fset *token.FileSet, file *ast.File, dir string) *gotypes.Info {
+	info := &gotypes.Info{
+		Types:      map[ast.Expr]gotypes.TypeAndValue{},
+		Defs:       map[*ast.Ident]gotypes.Object{},
+		Uses:       map[*ast.Ident]gotypes.Object{},
+		Selections: map[*ast.SelectorExpr]*gotypes.Selection{},
+	}
+	conf := gotypes.Config{
+		Importer: importer.Default(),
+		Error:    func(error) {},
+	}
+	if dir != "" {
+		cwd, err := os.Getwd()
+		if err == nil {
+			if chErr := os.Chdir(dir); chErr == nil {
+				_, _ = conf.Check(file.Name.Name, fset, []*ast.File{file}, info)
+				_ = os.Chdir(cwd)
+				return info
+			}
+		}
+	}
+	_, _ = conf.Check(file.Name.Name, fset, []*ast.File{file}, info)
+	return info
 }
 
 func findFunc(file *ast.File, name string) *ast.FuncDecl {
@@ -96,19 +233,32 @@ func findFunc(file *ast.File, name string) *ast.FuncDecl {
 	return nil
 }
 
-func importAliases(file *ast.File) map[string]string {
+func importAliases(file *ast.File, dir string) map[string]string {
 	out := map[string]string{}
+	resolver := newPackageNameResolver(dir)
 	for _, spec := range file.Imports {
 		raw, _ := strconv.Unquote(spec.Path.Value)
 		name := path.Base(raw)
 		if spec.Name != nil {
 			name = spec.Name.Name
+		} else if resolved, err := resolver.packageName(raw); err == nil && resolved != "" {
+			name = resolved
 		}
 		if name != "." && name != "_" && name != "" {
 			out[name] = raw
 		}
 	}
 	return out
+}
+
+func localPackageName(file *ast.File, opts Options) string {
+	if opts.LocalPackageName != "" {
+		return opts.LocalPackageName
+	}
+	if file.Name != nil {
+		return file.Name.Name
+	}
+	return ""
 }
 
 func sortedImportNames(used map[string]bool) []string {
@@ -120,6 +270,22 @@ func sortedImportNames(used map[string]bool) []string {
 		out = append(out, name)
 	}
 	sortStrings(out)
+	return out
+}
+
+func usedImportMap(names []string, all map[string]string) map[string]string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, name := range names {
+		if path := all[name]; path != "" {
+			out[name] = path
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }
 
@@ -162,8 +328,12 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		thenBody, err := t.stmtList(x.Body.List)
-		if err != nil {
+		var thenBody []any
+		if err := t.locals.withFrame(func() error {
+			var err error
+			thenBody, err = t.stmtList(x.Body.List)
+			return err
+		}); err != nil {
 			return nil, err
 		}
 		elseBody, err := t.elseBody(x.Else)
@@ -232,7 +402,15 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 	case *ast.SelectStmt:
 		return t.selectStmt(x)
 	case *ast.BlockStmt:
-		return t.stmtList(x.List)
+		var body []any
+		if err := t.locals.withFrame(func() error {
+			var err error
+			body, err = t.stmtList(x.List)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		return body, nil
 	case *ast.LabeledStmt:
 		return nil, t.unsupported(s, "labels are not supported", "remove labels or keep this code in Go")
 	case *ast.IncDecStmt:
@@ -265,7 +443,7 @@ func (t *translator) varDecl(decl *ast.GenDecl) ([]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			t.locals[name.Name] = true
+			t.locals.add(name.Name)
 			out = append(out, map[string]any{"let": map[string]any{name.Name: expr}})
 		}
 	}
@@ -286,7 +464,7 @@ func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 			return nil, err
 		}
 		if x.Tok == token.DEFINE {
-			t.locals[name] = true
+			t.locals.add(name)
 			return []any{map[string]any{"let": map[string]any{name: rhs}}}, nil
 		}
 		if x.Tok == token.ASSIGN {
@@ -307,7 +485,7 @@ func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 			}
 			names = append(names, id.Name)
 			if x.Tok == token.DEFINE {
-				t.locals[id.Name] = true
+				t.locals.add(id.Name)
 			}
 		}
 		rhs, err := t.expr(x.Rhs[0])
@@ -325,7 +503,15 @@ func (t *translator) elseBody(s ast.Stmt) ([]any, error) {
 	}
 	switch x := s.(type) {
 	case *ast.BlockStmt:
-		return t.stmtList(x.List)
+		var body []any
+		if err := t.locals.withFrame(func() error {
+			var err error
+			body, err = t.stmtList(x.List)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		return body, nil
 	case *ast.IfStmt:
 		items, err := t.stmt(x)
 		if err != nil {
@@ -342,23 +528,27 @@ func (t *translator) rangeStmt(x *ast.RangeStmt) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, err := t.stmtList(x.Body.List)
-	if err != nil {
-		return nil, err
-	}
 	as := "_"
 	idx := ""
 	if id, ok := x.Value.(*ast.Ident); ok && id.Name != "_" {
 		as = id.Name
-		t.locals[id.Name] = true
 	}
 	if id, ok := x.Key.(*ast.Ident); ok && id.Name != "_" {
 		idx = id.Name
-		t.locals[id.Name] = true
 	}
 	if as == "_" && idx != "" {
 		as = idx
 		idx = ""
+	}
+	var body []any
+	if err := t.locals.withFrame(func() error {
+		t.locals.add(as)
+		t.locals.add(idx)
+		var err error
+		body, err = t.stmtList(x.Body.List)
+		return err
+	}); err != nil {
+		return nil, err
 	}
 	loop := map[string]any{"target": target, "as": as, "do": body}
 	if idx != "" {
@@ -399,11 +589,15 @@ func (t *translator) forStmt(x *ast.ForStmt) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, err := t.stmtList(x.Body.List)
-	if err != nil {
+	var body []any
+	if err := t.locals.withFrame(func() error {
+		t.locals.add(id.Name)
+		var err error
+		body, err = t.stmtList(x.Body.List)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	t.locals[id.Name] = true
 	return []any{map[string]any{"fori": map[string]any{
 		"var":  id.Name,
 		"from": from,
@@ -440,8 +634,12 @@ func (t *translator) goStmt(x *ast.GoStmt) ([]any, error) {
 		if len(x.Call.Args) != 0 {
 			return nil, t.unsupported(x.Call, "go func literal call with args is not supported", "capture values from outer scope or use a host function")
 		}
-		body, err := t.stmtList(fun.Body.List)
-		if err != nil {
+		var body []any
+		if err := t.locals.withFrame(func() error {
+			var err error
+			body, err = t.stmtList(fun.Body.List)
+			return err
+		}); err != nil {
 			return nil, err
 		}
 		return []any{map[string]any{"routine": map[string]any{"do": body}}}, nil
@@ -460,11 +658,15 @@ func (t *translator) selectStmt(x *ast.SelectStmt) ([]any, error) {
 		if !ok {
 			return nil, t.unsupported(stmt, "select body must contain communication clauses", "")
 		}
-		do, err := t.stmtList(cc.Body)
-		if err != nil {
-			return nil, err
-		}
+		var do []any
 		if cc.Comm == nil {
+			if err := t.locals.withFrame(func() error {
+				var err error
+				do, err = t.stmtList(cc.Body)
+				return err
+			}); err != nil {
+				return nil, err
+			}
 			cases = append(cases, map[string]any{"default": do})
 			continue
 		}
@@ -489,9 +691,6 @@ func (t *translator) selectStmt(x *ast.SelectStmt) ([]any, error) {
 					return nil, t.unsupported(lhs, "select receive targets must be identifiers", "")
 				}
 				bind = append(bind, id.Name)
-				if comm.Tok == token.DEFINE {
-					t.locals[id.Name] = true
-				}
 			}
 			inner["recv"] = []any{ch}
 			inner["bind"] = bind
@@ -518,6 +717,21 @@ func (t *translator) selectStmt(x *ast.SelectStmt) ([]any, error) {
 		default:
 			return nil, t.unsupported(comm, "select case is not supported", "")
 		}
+		if err := t.locals.withFrame(func() error {
+			if comm, ok := cc.Comm.(*ast.AssignStmt); ok && comm.Tok == token.DEFINE {
+				for _, lhs := range comm.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						t.locals.add(id.Name)
+					}
+				}
+			}
+			var err error
+			do, err = t.stmtList(cc.Body)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		inner["do"] = do
 		cases = append(cases, map[string]any{"case": inner})
 	}
 	return []any{map[string]any{"select": cases}}, nil
@@ -538,7 +752,7 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 		}
 	case *ast.SelectorExpr:
 		root := selectorRoot(x)
-		if root != "" && t.imports[root] != "" {
+		if root != "" && t.isPackageSelector(x) {
 			return nil, t.unsupported(x, "package selector cannot be used as a value", "call the package function or expose a host value")
 		}
 		return varNode(selectorPath(x)), nil
@@ -660,7 +874,7 @@ func (t *translator) hostCall(x *ast.CallExpr) (any, error) {
 	}
 	args := []any{}
 	root := selectorRoot(sel)
-	if root != "" && t.imports[root] != "" {
+	if root != "" && t.isPackageSelector(sel) {
 		t.markImport(root)
 		args = append(args, map[string]any{"pkg": root})
 	} else {
@@ -725,31 +939,38 @@ func (t *translator) compositeLit(x *ast.CompositeLit) (any, error) {
 	case *ast.SelectorExpr:
 		typeName := selectorPath(typ)
 		root := selectorRoot(typ)
-		if root != "" && t.imports[root] != "" {
+		if root != "" && t.isPackageSelector(typ) {
 			t.markImport(root)
 		}
-		fields := map[string]any{}
-		for _, el := range x.Elts {
-			kv, ok := el.(*ast.KeyValueExpr)
-			if !ok {
-				return nil, t.unsupported(el, "struct literal requires keyed fields", "")
-			}
-			key, ok := kv.Key.(*ast.Ident)
-			if !ok {
-				return nil, t.unsupported(kv.Key, "struct literal field must be identifier", "")
-			}
-			val, err := t.expr(kv.Value)
-			if err != nil {
-				return nil, err
-			}
-			fields[key.Name] = val
-		}
-		return map[string]any{"struct": []any{typeName, fields}}, nil
+		return t.structLiteral(x, typeName)
 	case *ast.Ident:
-		return nil, t.unsupported(x, "local struct literals are not supported", "use a registered package type such as pkg.Type")
+		if t.localPackageName == "" {
+			return nil, t.unsupported(x, "local struct literal requires a package name", "set Options.LocalPackageName or use pkg.Type")
+		}
+		return t.structLiteral(x, t.localPackageName+"."+typ.Name)
 	default:
 		return nil, t.unsupported(x.Type, "composite literal type is not supported", "")
 	}
+}
+
+func (t *translator) structLiteral(x *ast.CompositeLit, typeName string) (any, error) {
+	fields := map[string]any{}
+	for _, el := range x.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			return nil, t.unsupported(el, "struct literal requires keyed fields", "")
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			return nil, t.unsupported(kv.Key, "struct literal field must be identifier", "")
+		}
+		val, err := t.expr(kv.Value)
+		if err != nil {
+			return nil, err
+		}
+		fields[key.Name] = val
+	}
+	return map[string]any{"struct": []any{typeName, fields}}, nil
 }
 
 func (t *translator) markImport(name string) {
@@ -757,6 +978,25 @@ func (t *translator) markImport(name string) {
 		t.usedImports = map[string]bool{}
 	}
 	t.usedImports[name] = true
+}
+
+func (t *translator) isPackageSelector(sel *ast.SelectorExpr) bool {
+	id, ok := selectorRootIdent(sel.X)
+	if !ok {
+		return false
+	}
+	if t.info != nil {
+		if _, ok := t.info.Uses[id].(*gotypes.PkgName); ok {
+			return true
+		}
+		if obj, ok := t.info.Uses[id]; ok && obj != nil {
+			return false
+		}
+		if obj, ok := t.info.Defs[id]; ok && obj != nil {
+			return false
+		}
+	}
+	return t.imports[id.Name] != "" && !t.locals.has(id.Name)
 }
 
 func (t *translator) unsupported(n ast.Node, reason, hint string) error {
@@ -837,6 +1077,16 @@ func selectorRoot(e ast.Expr) string {
 		return selectorRoot(x.X)
 	}
 	return ""
+}
+
+func selectorRootIdent(e ast.Expr) (*ast.Ident, bool) {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x, true
+	case *ast.SelectorExpr:
+		return selectorRootIdent(x.X)
+	}
+	return nil, false
 }
 
 func typeName(e ast.Expr) string {

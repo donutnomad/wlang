@@ -54,6 +54,34 @@ func eqNormalize(user eqUser) eqUser {
 	return user
 }
 
+type eqBookArgs struct {
+	Name string
+	Risk int64
+}
+
+type eqBookResult struct {
+	Name    string
+	Message string
+}
+
+type eqBooker struct {
+	booked []eqBookArgs
+}
+
+func (b *eqBooker) Book(args eqBookArgs) eqBookResult {
+	b.booked = append(b.booked, args)
+	return eqBookResult{Name: args.Name, Message: "risk"}
+}
+
+func eqPrepareName(user eqUser) string {
+	return user.Name + "-prepared"
+}
+
+func eqBookRule(user eqUser, booker *eqBooker) eqBookResult {
+	name := eqPrepareName(user)
+	return booker.Book(eqBookArgs{Name: name, Risk: user.Age})
+}
+
 func eqRule(user eqUser, scores []int64, scorer *eqScorer, store *eqStore) eqDecision {
 	normalized := eqNormalize(user)
 	total := int64(0)
@@ -194,6 +222,78 @@ func Rule(user eqUser, scores []int64, scorer *eqScorer, store *eqStore) policy.
 	}
 	if !reflect.DeepEqual(runtimeStore.saved, goStore.saved) {
 		t.Fatalf("store side effects mismatch\nwant: %#v\ngot:  %#v", goStore.saved, runtimeStore.saved)
+	}
+}
+
+func TestTranslatedJSONMatchesStructLiteralArgumentBehavior(t *testing.T) {
+	src := []byte(`package rules
+
+import policy "example.com/policy"
+
+type eqBookArgs struct {
+	Name string
+	Risk int64
+}
+
+func Rule(user eqUser, booker *eqBooker) policy.eqBookResult {
+	name := policy.eqPrepareName(user)
+	return booker.Book(eqBookArgs{Name: name, Risk: user.Age})
+}
+`)
+	user := eqUser{Name: "alice", Age: 42, Active: true}
+	goBooker := &eqBooker{}
+	want := eqBookRule(user, goBooker)
+
+	jsonProgram, err := go2wlang.TranslateFile(src, go2wlang.Options{
+		FuncName:         "Rule",
+		LocalPackageName: "policy",
+	})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+
+	reg := wflang.DefaultRegistry()
+	if err := reg.BindGoPackage("policy", registry.PackageSpec{
+		Functions: []registry.FuncSpec{
+			{GoName: "eqPrepareName", Impl: eqPrepareName, Pure: true},
+		},
+	}); err != nil {
+		t.Fatalf("BindGoPackage: %v", err)
+	}
+	if err := reg.BindType("policy.eqBookArgs", reflect.TypeFor[eqBookArgs](), wflang.BindOptions{}); err != nil {
+		t.Fatalf("BindType args: %v", err)
+	}
+	if err := reg.BindType("policy.eqBookResult", reflect.TypeFor[eqBookResult](), wflang.BindOptions{}); err != nil {
+		t.Fatalf("BindType result: %v", err)
+	}
+	if err := reg.AutoBindType((*eqBooker)(nil)); err != nil {
+		t.Fatalf("AutoBindType booker: %v", err)
+	}
+
+	runtimeBooker := &eqBooker{}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON(jsonProgram)
+	if err != nil {
+		t.Fatalf("CompileJSON: %v\n%s", err, jsonProgram)
+	}
+	gotV, err := prog.Run(context.Background(), wflang.RunOptions{
+		Vars: map[string]any{
+			"user":   user,
+			"booker": runtimeBooker,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run generated JSON: %v\n%s", err, jsonProgram)
+	}
+	got, ok := gotV.Go().(eqBookResult)
+	if !ok {
+		t.Fatalf("result carrier = %T, want eqBookResult", gotV.Go())
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("result mismatch\nwant: %#v\ngot:  %#v", want, got)
+	}
+	if !reflect.DeepEqual(runtimeBooker.booked, goBooker.booked) {
+		t.Fatalf("booker side effects mismatch\nwant: %#v\ngot:  %#v", goBooker.booked, runtimeBooker.booked)
 	}
 }
 

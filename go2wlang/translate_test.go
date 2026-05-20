@@ -109,6 +109,61 @@ func Concurrent(input string) string {
 	}
 }
 
+func TestTranslateFileCurrentPackageStructLiteralArgument(t *testing.T) {
+	src := []byte(`package rules
+
+import "example.com/api"
+
+type Args struct{ Name string }
+
+func Rule(booker api.Booker, input string) api.Result {
+	return booker.Book(Args{Name: input})
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	pseudo, err := wflang.FormatPseudoCode(out)
+	if err != nil {
+		t.Fatalf("pseudo: %v", err)
+	}
+	got := string(pseudo)
+	for _, needle := range []string{
+		"return booker.Book(struct rules.Args {",
+		"Name: input",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in:\n%s", needle, got)
+		}
+	}
+}
+
+func TestTranslateFileCurrentPackageStructLiteralUsesLocalPackageName(t *testing.T) {
+	src := []byte(`package rules
+
+import "example.com/api"
+
+type Args struct{ Name string }
+
+func Rule(booker api.Booker, input string) api.Result {
+	return booker.Book(Args{Name: input})
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule", LocalPackageName: "approval"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	pseudo, err := wflang.FormatPseudoCode(out)
+	if err != nil {
+		t.Fatalf("pseudo: %v", err)
+	}
+	got := string(pseudo)
+	if !strings.Contains(got, "return booker.Book(struct approval.Args {") {
+		t.Fatalf("missing local package struct literal in:\n%s", got)
+	}
+}
+
 func TestTranslateFileUnsupportedReportsDiagnostic(t *testing.T) {
 	src := []byte(`package rules
 
