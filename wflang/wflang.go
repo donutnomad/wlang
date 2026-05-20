@@ -90,7 +90,6 @@ type SessionOptions struct {
 	Vars                map[string]any
 	VarOptions          map[string]VarOptions
 	Packages            map[string]PackageSpec
-	RoutineYieldHandler func(ctx context.Context, y YieldState)
 	RoutineErrorHandler func(ctx context.Context, err error)
 	// Lang declares the wflang language version of this session
 	// (LANGUAGE.md §3.1). Defaults to "wflang/v1" when empty.
@@ -98,44 +97,6 @@ type SessionOptions struct {
 	// Imports declares the initial import set; subsequent envelope
 	// fragments take the union with this set (TC-159).
 	Imports []string
-}
-
-// YieldError is a Go error that a host function returns from inside a routine
-// to suspend execution. Host functions construct one via NewYield (LANGUAGE.md
-// §8.1).
-type YieldError interface {
-	error
-	Token() string
-	Payload() any
-}
-
-// yieldErr is the built-in YieldError implementation.
-type yieldErr struct {
-	token   string
-	payload any
-}
-
-func (y *yieldErr) Error() string { return "yield:" + y.token }
-func (y *yieldErr) Token() string { return y.token }
-func (y *yieldErr) Payload() any  { return y.payload }
-
-// NewYield creates a YieldError for use by host functions.
-func NewYield(token string, payload any) error {
-	return &yieldErr{token: token, payload: payload}
-}
-
-// YieldState is routine yielded information (§5.2 / §8).
-type YieldState struct {
-	Token       string
-	Path        string
-	ReturnTypes []string
-}
-
-// ResumeInput is ResumeYield payload (§5.2).
-type ResumeInput struct {
-	Token   string
-	Results []Value
-	Err     error
 }
 
 // Engine is the top-level runtime.
@@ -296,7 +257,12 @@ func astWalkChildren(n ast.Node, fn func(ast.Node)) {
 	case *ast.Panic:
 		fn(x.Expr)
 	case *ast.Routine:
-		fn(x.Call)
+		if x.Call != nil {
+			fn(x.Call)
+		}
+		for _, s := range x.Body {
+			fn(s)
+		}
 	case *ast.Foreach:
 		fn(x.Target)
 		for _, s := range x.Do {
@@ -309,13 +275,6 @@ func astWalkChildren(n ast.Node, fn func(ast.Node)) {
 			fn(x.Step)
 		}
 		for _, s := range x.Do {
-			fn(s)
-		}
-	case *ast.Try:
-		for _, s := range x.Do {
-			fn(s)
-		}
-		for _, s := range x.Catch {
 			fn(s)
 		}
 	case *ast.Match:
@@ -417,8 +376,6 @@ func (e *Engine) NewSession(opts SessionOptions) (*Session, error) {
 		reg:      reg,
 		finished: false,
 		onErr:    opts.RoutineErrorHandler,
-		onYield:  opts.RoutineYieldHandler,
-		yields:   map[string]*pendingYield{},
 		lang:     lang,
 		imports:  imports,
 	}, nil
@@ -432,10 +389,6 @@ type Session struct {
 	finished bool
 	result   Value
 	onErr    func(ctx context.Context, err error)
-	onYield  func(ctx context.Context, y YieldState)
-
-	yieldMu sync.Mutex
-	yields  map[string]*pendingYield
 
 	metaMu  sync.Mutex
 	lang    string
@@ -469,16 +422,6 @@ func sortStrings(a []string) {
 			a[j-1], a[j] = a[j], a[j-1]
 		}
 	}
-}
-
-// pendingYield is the suspended-routine record indexed by yield Token.
-// It captures everything needed to validate and synthesize the resumed
-// value (LANGUAGE.md §8.2 / TC-704).
-type pendingYield struct {
-	token       string
-	path        string
-	returnTypes []string
-	used        bool
 }
 
 // AppendRun compiles and executes one or more additional statements.
@@ -517,19 +460,7 @@ func (s *Session) AppendRun(ctx context.Context, data []byte) (Value, error) {
 	if s.onErr != nil {
 		rtErr = func(ctx context.Context, e error) { s.onErr(ctx, e) }
 	}
-	// Always install a yield handler so the Session can register the slot
-	// for ResumeYield, even when the caller provided no user handler.
-	rtYield := func(ctx context.Context, y runtime.RoutineYieldReport) {
-		s.registerYield(y)
-		if s.onYield != nil {
-			s.onYield(ctx, YieldState{
-				Token:       y.Token,
-				Path:        y.Path,
-				ReturnTypes: y.ReturnTypes,
-			})
-		}
-	}
-	exec.SetRoutineHandlers(rtErr, rtYield)
+	exec.SetRoutineHandlers(rtErr)
 	v, err := exec.RunProgram(prog)
 	if err != nil {
 		return Value{}, err
@@ -576,84 +507,6 @@ func (s *Session) mergeImports(imps []string) error {
 		s.imports[im] = true
 	}
 	return nil
-}
-
-// registerYield records a suspended routine slot. Token uniqueness within a
-// session is enforced (LANGUAGE.md §8.1 / TC-701). If the same token is
-// observed twice the second registration is silently ignored — the first
-// slot wins, and a later ResumeYield with that token resumes the original.
-func (s *Session) registerYield(y runtime.RoutineYieldReport) {
-	if y.Token == "" {
-		return
-	}
-	s.yieldMu.Lock()
-	defer s.yieldMu.Unlock()
-	if _, exists := s.yields[y.Token]; exists {
-		return
-	}
-	s.yields[y.Token] = &pendingYield{
-		token:       y.Token,
-		path:        y.Path,
-		returnTypes: append([]string(nil), y.ReturnTypes...),
-	}
-}
-
-// ResumeYield delivers a ResumeInput to a suspended routine identified by
-// Token. Implements LANGUAGE.md §5.2 / §8.3:
-//
-//   - unknown / used token  → E_YIELD_TOKEN_MISMATCH
-//   - Err set               → routine call surfaces it as a host error
-//   - len(Results)==0       → null typed value
-//   - single Result         → single typed value (after type check)
-//   - multiple Results      → tuple<T1,T2,...>
-//
-// The returned Value is what the routine "would have received" as the
-// host call's continuation result. Type validation against ReturnTypes
-// follows §5.4 (auto host type names supported, TC-708).
-func (s *Session) ResumeYield(input ResumeInput) (Value, error) {
-	s.yieldMu.Lock()
-	slot, ok := s.yields[input.Token]
-	if !ok || slot.used {
-		s.yieldMu.Unlock()
-		return Value{}, werr.Newf(werr.CodeYieldTokenMismatch,
-			"unknown or already-used yield token %q", input.Token)
-	}
-	slot.used = true
-	rtypes := append([]string(nil), slot.returnTypes...)
-	path := slot.path
-	s.yieldMu.Unlock()
-
-	if input.Err != nil {
-		le := werr.Newf(werr.CodeHost, "resume error: %v", input.Err).WithPath(path)
-		le.Cause = input.Err
-		return Value{}, le
-	}
-	// Validate Results vs ReturnTypes.
-	if len(rtypes) == 0 && len(input.Results) == 0 {
-		v, _ := types.NewNull()
-		return v, nil
-	}
-	if len(input.Results) != len(rtypes) {
-		return Value{}, werr.Newf(werr.CodeType,
-			"resume: expected %d result(s) for %v, got %d",
-			len(rtypes), rtypes, len(input.Results)).WithPath(path)
-	}
-	for i, want := range rtypes {
-		got := input.Results[i].TypeName()
-		if got != want && !input.Results[i].IsNull() {
-			return Value{}, werr.Newf(werr.CodeType,
-				"resume: result %d: want %s, got %s", i, want, got).WithPath(path)
-		}
-	}
-	if len(input.Results) == 1 {
-		return input.Results[0], nil
-	}
-	tupleName := types.TupleType(rtypes)
-	raw := make([]any, len(input.Results))
-	for i, r := range input.Results {
-		raw[i] = r.Go()
-	}
-	return types.NewValue(tupleName, raw), nil
 }
 
 // toStatementArray ensures the input is wrapped as `[...]` for ParseProgram.

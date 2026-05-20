@@ -261,8 +261,6 @@ registry.BindGoPackage("books", booksPackage)
 - `error` 类型只自动暴露 Go 方法集；Go `error` 接口只有 `Error() string`，语言中只能调用 `Error` 映射出来的 operator。
 - 默认执行模式中，`error != nil` 会中断当前表达式；`try` 启用后，`error` 可作为普通语言值返回给程序处理。
 - 前台宿主调用按普通 Go 调用处理返回值和 `error`。
-- `yield` 只在 `routine` 内部宿主调用中被执行器识别。
-- 前台宿主调用返回 `yield` error 时，按普通 Go `error` 处理。
 
 目标桥接模型以 Go 类型自动绑定为主：宿主注册 Go 类型后，Registry 通过反射扫描该类型的可导出方法，自动生成语言方法表。
 
@@ -297,7 +295,6 @@ registry.AutoBindType("user", reflect.TypeFor[*User]())
 - 方法返回值映射为语言返回类型。
 - 方法签名采用 `(T, error)`、`(context.Context, ..., T) (R, error)`、`(wflang.Env, ..., T) (R, error)` 等宿主签名。
 - 方法返回的 `error` 使用内置 `error` 类型承载，方法集来自 Go `error` 接口。
-- 方法在前台调用中返回宿主定义的 `yield` error 时，执行器按普通 Go `error` 处理。
 - 方法名与 Go 导出方法名完全一致。
 - 显式 overload 映射可以把多个 Go 方法绑定到同一个语言 operator。
 - 语言调用统一使用 JSONLogic operator 形态：`{ "GoMethodName": [receiver, ...args] }`。
@@ -499,7 +496,7 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 - 新片段只能追加到当前执行序列尾部。
 - 已执行片段的语义保持稳定。
 - `return` 后 session 进入 completed 状态，继续追加返回诊断错误。
-- `routine` 后台执行中产生的 yield 进入 routine yielded 状态，宿主通过 `ResumeYield` 注入对应 routine 调用的返回值后继续执行该 routine。
+- `routine` 后台执行返回 `routineHandle`，后续片段可通过 `await` 等待并读取结果。
 - 渐进式执行不要求宿主一次性构造完整 JSON 程序。
 
 渐进式作用域规则：
@@ -708,7 +705,7 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 
 #### `routine`
 
-`routine` 映射 Go `go` 关键字，把**一个宿主调用**放入新的 goroutine 执行。
+`routine` 映射 Go `go` 关键字，把**一个宿主调用**放入新的 goroutine 执行，并立即返回 `routineHandle`。
 
 ```json
 {
@@ -726,14 +723,32 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 - `routine` 的参数**必须是单个宿主调用表达式**：`{ "GoName": [receiver, ...args] }`。
 - `routine` 先在当前 goroutine 中求值 receiver 和参数。
 - 求值完成后，执行器用 Go `go` 关键字启动该宿主调用。
-- `routine` 自身立即返回 `{ "literal": { "type": "null", "value": null } }`。
-- goroutine 内的普通 Go 返回值由 Go 语义丢弃。
-- goroutine 内的 Go `error` 进入宿主 `RoutineErrorHandler`。
-- goroutine 内的 panic 进入宿主 `RoutinePanicHandler`。
-- goroutine 内的 yield 生成 routine yielded 状态，并进入宿主 `RoutineYieldHandler`。
-- `RoutineYieldHandler` 保存 token 后，宿主通过 `ResumeYield` 注入返回值。
+- `routine` 自身立即返回 `routineHandle`。
+- goroutine 内的 Go 返回值或 Go `error` 写入 handle。
+- fire-and-forget 使用中，goroutine 内的 Go `error` 同时进入宿主 `RoutineErrorHandler`。
 - `routine` 需要 `routine:spawn` capability。
 - `routine` 受 `MaxRoutines` 预算限制。
+
+#### `await`
+
+`await` 等待一个或多个 `routineHandle` 完成。
+
+```json
+[
+  { "let": { "h": { "routine": { "Fetch": [ { "pkg": "books" }, { "var": "id" } ] } } } },
+  { "return": { "await": { "var": "h" } } }
+]
+```
+
+语义规则：
+
+- `await` 单个 handle 时，返回该 routine 的业务返回值。
+- `await` 多个 handle 时，按输入顺序返回 `array<any>`。
+- 无业务返回值或仅 `error` 成功时返回 `null`。
+- 单业务返回值返回单个 typed value。
+- 多业务返回值返回 `tuple<T1,T2,...>`。
+- routine 返回 Go `error` 时，`await` 按普通错误短路；`try` 可捕获该错误。
+- 同一个 handle 可重复 `await`，结果或错误会缓存并复用。
 
 设计约束（**为什么 routine 不能包一段语句序列**）：
 
@@ -1162,50 +1177,34 @@ result, err = session.AppendRun(ctx, json.RawMessage(`{
 - 解析当前片段。
 - 编译当前片段为追加的 `CallPlan`。
 - 从上次停止位置继续执行。
-- 返回当前 session 状态、返回值、已记录的 routine yielded 状态或诊断错误。
+- 返回当前 session 状态、返回值或诊断错误。
 - 保留变量、作用域、顶级上下文、包 receiver 和调用计划。
 
-Yield 恢复 API：
+routine handle / await：
 
 ```go
 session := engine.NewSession(wflang.SessionOptions{
-    RoutineYieldHandler: func(ctx context.Context, y wflang.YieldState) {
-        asyncYieldStore.Save(y.Token, y)
+    RoutineErrorHandler: func(ctx context.Context, err error) {
+        log.Printf("background routine failed: %v", err)
     },
 })
 
-_, err := session.AppendRun(ctx, json.RawMessage(`{
-    "routine": {
-        "RunAsync": [
-            {"var": "user"},
-            {"literal": {"type": "int64", "value": "1001"}}
-        ]
-    }
-}`))
-if err != nil {
-    return err
-}
-
-yielded := asyncYieldStore.Wait()
-
-result, err := session.ResumeYield(ctx, wflang.ResumeInput{
-    Token: yielded.Token,
-    Results: []wflang.Value{
-        wflang.MustValue("string", "done"),
-    },
-})
+result, err := session.AppendRun(ctx, json.RawMessage(`[
+    {"let":{"h":{"routine":{"RunAsync":[
+        {"var":"user"},
+        {"literal":{"type":"int64","value":"1001"}}
+    ]}}}},
+    {"return":{"await":{"var":"h"}}}
+]`))
 ```
 
-`ResumeYield` 语义：
+`await` 语义：
 
-- `Token` 必须匹配当前 session 的 routine yielded 调用点。
-- `Token` 是一次性恢复凭证，成功恢复后失效。
-- `Results` 是被挂起 routine 函数调用的业务返回值。
-- `Results` 的数量和类型必须匹配 routine 挂起调用点的 `ReturnTypes`。
-- `ResumeInput.Err` 可注入该调用的 Go `error`，执行规则与普通 Go 函数返回 `error` 一致。
-- 多业务返回值按 `tuple<T1,T2,...>` 注入。
-- 只有 `error` 返回值的函数在成功恢复时注入 `null`。
-- 恢复成功后，执行器把注入值写回 routine 表达式结果槽，并从 routine 挂起调用点之后继续执行。
+- `routine` 启动后台 host call 并返回 `routineHandle`。
+- `await` 等待 handle 完成并读取结果。
+- 多业务返回值按 `tuple<T1,T2,...>` 返回。
+- 多 handle await 按输入顺序返回 `array<any>`。
+- host call 返回 `error` 时，`await` 走普通错误路径。
 
 ### 5.3 函数注册目标
 
@@ -1219,7 +1218,7 @@ func(args ...T) (R, error)
 func(ctx context.Context, args ...T) (R, error)
 ```
 
-wflang 按语句和表达式顺序调用函数。前台函数调用返回宿主定义的 `yield` error 时，执行器按普通 Go `error` 处理。`routine` 内部函数调用返回 `yield` error 时，执行器挂起该 routine 调用点，并把 yield token、调用路径、期望返回类型返回给宿主。宿主异步完成后调用 `ResumeYield` 注入该调用的返回值，routine 从挂起点继续执行。
+wflang 按语句和表达式顺序调用函数。前台函数调用返回 Go `error` 时，执行器按普通错误路径处理。`routine` 内部函数调用返回 Go `error` 时，错误写入 `routineHandle`；裸 routine 同时把错误交给 `RoutineErrorHandler`。
 
 包函数元数据：
 
@@ -1284,7 +1283,7 @@ engine := wflang.NewEngine(wflang.EngineOptions{
 
 - wflang 只描述"调哪些函数、以什么顺序调、出错怎么冒泡"，不决定这些调用是否在同一个 Go 事务里执行。
 - 事务上下文通过 `context.Context` 从 `program.Run` 或 `AppendRun` 的 ctx 注入到 Go 宿主函数。需要事务时，宿主应在进入 `Run` 前 `ctx = txutil.WithTx(ctx, tx)`，所有相关宿主函数从 ctx 取出同一个事务对象。
-- 一次 `Run` 或一次 `ResumeYield` 的所有前台宿主调用共享同一个 ctx；`routine.do` 内部宿主调用共享同一个 ctx（派生自启动点的 ctx）。
+- 一次 `Run` 或 `AppendRun` 的所有前台宿主调用共享同一个 ctx；`routine` 内部宿主调用共享派生自启动点的 ctx。
 - 语言层默认短路（9.1.1）只影响执行流，不会回滚已发生的副作用；是否在 error 时回滚事务由宿主在 `Run` 返回后根据 error 决定。
 
 Go 到 wflang 的转换对象是 Registry 中绑定的包函数、类型方法、类型映射和由 Go Builder 描述的调用图。普通 Go 业务逻辑先通过 `BindGoPackage`、`AutoBindType`、`BindMethodOverloads` 暴露为语言可调用能力，再由配置生成器输出 JSON AST。
@@ -1299,7 +1298,7 @@ Registry metadata
 wflang JSON config
         ↓ CompileJSON
 CallPlan
-        ↓ Run / ResumeYield
+        ↓ Run / await
 Go reflect call result
 ```
 
@@ -1406,7 +1405,7 @@ result, err := program.Run(ctx, wflang.RunOptions{
 - `Run` 按 JSON AST 顺序执行，并通过 Go reflection 调用宿主函数或方法。
 - Go 返回值映射为 wflang typed value。
 - Go `error` 映射为内置 `error` 或执行错误路径。
-- routine 内部 Go yield error 进入 routine yielded 状态，并通过 `ResumeYield` 注入异步返回值。
+- routine 返回 `routineHandle`，`await` 读取后台 Go 调用结果。
 
 ### 5.8 Round-trip 验收
 
@@ -1442,7 +1441,7 @@ result, err := program.Run(ctx, wflang.RunOptions{
 - `CompileJSON` 生成的 `CallPlan` 指向 Registry 中同一个 Go 函数或方法。
 - `Run` 返回值类型与 Builder 推断类型一致。
 - `Explain` 能列出从 Go symbol 到 JSON path 再到 `CallPlan` 的映射。
-- Conformance test 覆盖 package call、method call、typed literal、tuple、routine yield resume、auto host type。
+- Conformance test 覆盖 package call、method call、typed literal、tuple、routine handle、await、auto host type。
 
 ---
 
@@ -1731,16 +1730,6 @@ type CallPlan struct {
     ErrorIndex    int
     ResultKind    ResultKind
     Capabilities []string
-    YieldAware   bool
-}
-
-// 运行期 routine yielded 状态由 routine 内部 yield error 产生。
-type YieldState struct {
-    Token       string
-    Payload     any
-    Path        string
-    CallPlanID  uint64
-    ReturnTypes []types.Type
 }
 ```
 
@@ -1753,10 +1742,8 @@ type YieldState struct {
 - `error == nil` 且业务返回值数量大于 1 时返回 `tuple<T1,T2,...>`。
 - `error == nil` 且只有 error 返回值时返回 `null` typed value。
 - `error != nil` 且是普通 Go error 时按普通 Go error 处理。
-- 前台调用中 `error != nil` 时按普通 Go error 处理，yield error 也走普通 error 路径。
-- routine 调用中 `error != nil` 且是 yield error 时保存 routine 挂起调用点并返回 routine yielded 状态。
-- `ResumeYield` 注入成功结果时，按 `ResultKind` 生成 typed value 或 tuple。
-- `ResumeYield` 注入 Go `error` 时，按普通 Go error 处理。
+- routine 调用将返回值或错误写入 `routineHandle`。
+- `await` 读取成功结果，或按普通错误路径返回 routine 错误。
 
 ### 7.8 Lower / Optimize
 
@@ -1771,93 +1758,49 @@ type YieldState struct {
 
 ---
 
-## 8. Yield 挂起与恢复
+## 8. routine handle 与 await
 
-### 8.1 Yield error
+### 8.1 routineHandle
 
-Yield 是宿主通过 Go `error` 返回的 routine 控制信号。`routine` 内部宿主调用返回 yield error 时，执行器进入 routine yielded 状态。前台普通调用返回 yield error 时，它就是一个普通 Go `error`。
+`routineHandle` 是 `routine` 返回的内部 future-like 值。它保存后台 host call 的完成状态、返回值、错误和调用路径。
 
-推荐接口：
+规则：
 
-```go
-type YieldError interface {
-    error
-    Token() string
-    Payload() any
+- handle 只由 `routine` 创建。
+- handle 可存入变量并跨后续语句使用。
+- handle 完成后缓存结果或错误。
+- 同一 handle 可重复 `await`。
+
+### 8.2 await
+
+`await` 等待 handle 完成并读取结果：
+
+```json
+[
+  {"let":{"h":{"routine":{"Load":[{"pkg":"books"},{"var":"id"}]}}}},
+  {"return":{"await":{"var":"h"}}}
+]
+```
+
+多个 handle 可一次等待：
+
+```json
+{
+  "await": [
+    {"var":"a"},
+    {"var":"b"}
+  ]
 }
 ```
 
-`Token` 是一次 routine yield 挂起点的唯一恢复凭证，用于把外部异步结果注入回正确的 routine 函数调用位置。`Payload` 由宿主保存异步任务信息。
+返回规则：
 
-Token 规则：
-
-- token 由产生 yield 的 Go 宿主函数创建。
-- token 在当前 session 的 routine yielded 状态中唯一。
-- token 可直接采用外部异步任务 ID、消息 ID、future ID 或数据库记录 ID。
-- `ResumeYield` 必须携带同一个 token。
-- token 匹配成功后只能消费一次，恢复完成后当前 routine yielded 状态清除。
-- token 匹配失败返回 `E_YIELD_TOKEN_MISMATCH`。
-
-示例：
-
-```go
-func (b Books) LoadAsync(id int64) (*Book, error) {
-    token := uuid.NewString()
-
-    asyncStore.Save(token, AsyncTask{
-        Kind: "books.LoadAsync",
-        BookID: id,
-    })
-
-    return nil, wflang.NewYield(token, AsyncPayload{
-        TaskID: token,
-    })
-}
-```
-
-### 8.2 routine 挂起调用点
-
-routine 挂起调用点保存：
-
-- JSON Pointer path。
-- 当前 `CallPlan`。
-- receiver 和已求值参数。
-- 期望返回类型 `ReturnTypes`。
-- Go 返回类型 `GoReturnTypes`。
-- 当前作用域栈和程序计数器。
-- routine yield token 和 payload。
-
-### 8.3 恢复注入
-
-宿主异步完成后调用 `ResumeYield`：
-
-```go
-result, err := session.ResumeYield(ctx, wflang.ResumeInput{
-    Token: token,
-    Results: []wflang.Value{value},
-})
-```
-
-外部任务完成后也可以直接使用任务 ID 恢复：
-
-```go
-task := asyncStore.Get(taskID)
-
-result, err := session.ResumeYield(ctx, wflang.ResumeInput{
-    Token: task.ID,
-    Results: []wflang.Value{bookValue},
-})
-```
-
-恢复规则：
-
-- `Results` 作为被挂起 routine 函数调用的业务返回值。
-- 单业务返回值恢复为单个 typed value。
-- 多业务返回值恢复为 `tuple<T1,T2,...>`。
-- 注入类型需要满足挂起调用点的 `ReturnTypes` 和 `GoReturnTypes`。
-- 注入未注册 Go 类型时，按自动宿主类型映射生成完整类型名。
-- `ResumeInput.Err` 注入 Go `error`，执行器按普通错误路径处理。
-- 恢复完成后，routine 从挂起表达式之后继续顺序执行。
+- 单 handle 返回该 routine 的 typed value。
+- 多 handle 返回 `array<any>`。
+- 多业务返回值使用 `tuple<T1,T2,...>`。
+- 只有 `error` 返回值且成功时返回 `null`。
+- routine 返回 Go `error` 时，`await` 返回诊断错误。
+- `await` 非 `routineHandle` 返回 `E_TYPE`。
 
 ## 9. 错误模型
 

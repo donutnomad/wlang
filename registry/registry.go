@@ -36,9 +36,6 @@ type FuncSpec struct {
 	Pure          bool
 	Deterministic bool
 	Capabilities  []string
-	// YieldAware marks the function as one that may return a YieldError; the
-	// compiler propagates this to CallPlan.YieldAware (LANGUAGE.md §7.7 / §8.1).
-	YieldAware bool
 	// Deprecated, when non-empty, signals the lint pass to emit L_DEPRECATED
 	// (LANGUAGE.md §13.2). The string is the migration guidance shown to users.
 	Deprecated string
@@ -76,7 +73,6 @@ type boundFunc struct {
 	variadic   bool
 	pure       bool
 	capability []string
-	yieldAware bool
 	deprecated string
 }
 
@@ -87,6 +83,7 @@ type boundPackage struct {
 
 type boundType struct {
 	name      string
+	rt        reflect.Type
 	methods   map[string]*boundFunc
 	overloads map[string]*overloadSet
 	// excluded records exported method names that were filtered out by
@@ -357,7 +354,6 @@ func (r *Registry) BindGoPackage(name string, spec PackageSpec) error {
 		if err != nil {
 			return err
 		}
-		bf.yieldAware = fs.YieldAware
 		bf.deprecated = fs.Deprecated
 		pkg.funcs[fs.GoName] = bf
 	}
@@ -391,6 +387,26 @@ func (r *Registry) BindGoPackageAuto(name string, target any) error {
 	return nil
 }
 
+// StructType returns the reflect.Type of a registered struct (struct literal
+// support, LANGUAGE.md §3.9). Only types whose underlying kind is reflect.Struct
+// are reported. The returned type is the value type (no pointer indirection).
+func (r *Registry) StructType(name string) (reflect.Type, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	bt, ok := r.types[name]
+	if !ok || bt.rt == nil {
+		return nil, false
+	}
+	rt := bt.rt
+	for rt.Kind() == reflect.Pointer {
+		rt = rt.Elem()
+	}
+	if rt.Kind() != reflect.Struct {
+		return nil, false
+	}
+	return rt, true
+}
+
 // AutoBindType registers a Go type's exported methods as callable on values of that type.
 func (r *Registry) AutoBindType(v any) error {
 	r.mu.Lock()
@@ -400,8 +416,10 @@ func (r *Registry) AutoBindType(v any) error {
 	name := types.AutoHostTypeName(rt)
 	bt := r.types[name]
 	if bt == nil {
-		bt = &boundType{name: name, methods: map[string]*boundFunc{}}
+		bt = &boundType{name: name, rt: rt, methods: map[string]*boundFunc{}}
 		r.types[name] = bt
+	} else if bt.rt == nil {
+		bt.rt = rt
 	}
 	for i := 0; i < rt.NumMethod(); i++ {
 		m := rt.Method(i)
@@ -471,8 +489,10 @@ func (r *Registry) BindType(name string, rt reflect.Type, opts BindOptions) erro
 
 	bt := r.types[name]
 	if bt == nil {
-		bt = &boundType{name: name, methods: map[string]*boundFunc{}}
+		bt = &boundType{name: name, rt: rt, methods: map[string]*boundFunc{}}
 		r.types[name] = bt
+	} else if bt.rt == nil {
+		bt.rt = rt
 	}
 	// Also register under the auto host-type name so Go-derived values still
 	// resolve methods by either name (LANGUAGE.md §2.1 / §4.2.2).
@@ -794,29 +814,6 @@ func (r *Registry) Invoke(ctx context.Context, op string, recv types.Value,
 		"no binding for operator %q on %s", op, typName).WithPath(path)
 }
 
-// yieldLike duck-types a runtime yield error without importing the wflang facade.
-type yieldLike interface {
-	error
-	Token() string
-	Payload() any
-}
-
-// yieldEnvelope wraps a host yield with the host function's business
-// ReturnTypes so the runtime can report them in RoutineYieldReport
-// (LANGUAGE.md §8 / TC-704).
-type yieldEnvelope struct {
-	inner       yieldLike
-	returnTypes []string
-	path        string
-}
-
-func (y *yieldEnvelope) Error() string         { return y.inner.Error() }
-func (y *yieldEnvelope) Token() string         { return y.inner.Token() }
-func (y *yieldEnvelope) Payload() any          { return y.inner.Payload() }
-func (y *yieldEnvelope) ReturnTypes() []string { return y.returnTypes }
-func (y *yieldEnvelope) Path() string          { return y.path }
-func (y *yieldEnvelope) Unwrap() error         { return y.inner }
-
 // reflectToTypeName mirrors wrapResult's primitive table for derivation of
 // business return types from a host function signature.
 func reflectToTypeName(t reflect.Type) string {
@@ -850,7 +847,7 @@ func reflectToTypeName(t reflect.Type) string {
 }
 
 // businessReturnTypes returns the function's return types with the trailing
-// error type omitted (the same shape ResumeYield Results must match).
+// error type omitted.
 func (bf *boundFunc) businessReturnTypes() []string {
 	out := []string{}
 	for _, t := range bf.outTypes {
@@ -906,76 +903,53 @@ func (bf *boundFunc) call(ctx context.Context, recv *types.Value,
 	if panicErr != nil {
 		return types.Value{}, panicErr
 	}
-	// Result shapes:
-	//   ()                        → null
-	//   (error)                   → null on nil, host err otherwise
-	//   (T)                       → wrapResult(T)
-	//   (T, error)                → wrapResult(T) or host err / yield envelope
-	//   (T1,...,Tn, error)        → tuple<T1,...,Tn> or host err / yield envelope
-	var resVal reflect.Value
-	var resErr error
-	switch {
-	case len(out) == 0:
+	// Result shapes (Go-style explicit error returns, no auto short-circuit):
+	//   ()                          → null
+	//   (error)                     → error typed value (null if nil)
+	//   (T) where T not error       → wrapResult(T)
+	//   (T, error)                  → tuple<T, error>
+	//   (T1,...,Tn)                 → tuple<T1,...,Tn>
+	//   (T1,...,Tn, error)          → tuple<T1,...,Tn, error>
+	// Host panics surface as werr.CodePanic (handled by safeCall above).
+	if len(out) == 0 {
 		v, _ := types.NewNull()
 		return v, nil
-	case len(out) == 1:
+	}
+	if len(out) == 1 {
 		if isErrorType(bf.outTypes[0]) {
-			if !out[0].IsNil() {
-				cause, _ := out[0].Interface().(error)
-				le := werr.Newf(werr.CodeHost,
-					"%q: %v", bf.name, out[0].Interface()).WithPath(path)
-				le.Cause = cause
-				return types.Value{}, le
-			}
-			v, _ := types.NewNull()
-			return v, nil
+			return errValue(out[0]), nil
 		}
-		resVal = out[0]
-	case len(out) == 2:
-		resVal = out[0]
-		if !out[1].IsNil() {
-			resErr, _ = out[1].Interface().(error)
-		}
-	default:
-		// (T1,...,Tn, error) shape — last out must be error.
-		last := len(out) - 1
-		if !isErrorType(bf.outTypes[last]) {
-			return types.Value{}, werr.Newf(werr.CodeHost,
-				"%q unsupported return arity %d (no trailing error)",
-				bf.name, len(out)).WithPath(path)
-		}
-		if !out[last].IsNil() {
-			resErr, _ = out[last].Interface().(error)
-		}
-		if resErr == nil {
-			// Build tuple<T1,...,Tn> from the prefix returns.
-			names := make([]string, last)
-			vals := make([]any, last)
-			for i := 0; i < last; i++ {
-				wv := wrapResult(out[i])
-				names[i] = wv.TypeName()
-				vals[i] = wv.Go()
-			}
-			return types.NewValue(types.TupleType(names), vals), nil
-		}
-		// Fall through to error handling below.
+		return wrapResult(out[0]), nil
 	}
-	if resErr != nil {
-		// If the host returned a yield error, surface it through a typed
-		// envelope so the routine machinery can attach ReturnTypes.
-		if y, ok := resErr.(yieldLike); ok {
-			return types.Value{}, &yieldEnvelope{
-				inner:       y,
-				returnTypes: bf.businessReturnTypes(),
-				path:        path,
-			}
+	// Multi-return: always tuple. If last return is error, include it as a
+	// typed `error` slot; otherwise treat all as data slots.
+	last := len(out) - 1
+	hasErr := isErrorType(bf.outTypes[last])
+	names := make([]string, len(out))
+	vals := make([]any, len(out))
+	for i, ov := range out {
+		if i == last && hasErr {
+			ev := errValue(ov)
+			names[i] = types.TError
+			vals[i] = ev.Go()
+			continue
 		}
-		le := werr.Newf(werr.CodeHost,
-			"%q: %v", bf.name, resErr).WithPath(path)
-		le.Cause = resErr
-		return types.Value{}, le
+		wv := wrapResult(ov)
+		names[i] = wv.TypeName()
+		vals[i] = wv.Go()
 	}
-	return wrapResult(resVal), nil
+	return types.NewValue(types.TupleType(names), vals), nil
+}
+
+// errValue converts an error-typed reflect.Value into a wflang Value. A nil
+// error becomes a typed null<error>; a non-nil error keeps the underlying Go
+// error reachable via the `error` type for downstream `err.Error()` calls.
+func errValue(rv reflect.Value) types.Value {
+	if !rv.IsValid() || rv.IsNil() {
+		return types.NewValue(types.TError, nil)
+	}
+	e, _ := rv.Interface().(error)
+	return types.NewValue(types.TError, e)
 }
 
 // isErrorType is true for types implementing error.
@@ -1130,7 +1104,6 @@ type FuncMeta struct {
 	HasError     bool
 	WantsEnv     bool
 	WantsCtx     bool
-	YieldAware   bool
 	Capabilities []string
 	Deprecated   string
 }
@@ -1166,14 +1139,6 @@ func (r *Registry) LookupTypeMethod(typeName, op string) *FuncMeta {
 	return bf.toMeta("method", "", typeName)
 }
 
-// IsYieldAware reports whether the function is annotated YieldAware.
-func (r *Registry) IsYieldAware(pkg, op string) bool {
-	if m := r.LookupPackageFunc(pkg, op); m != nil {
-		return m.YieldAware
-	}
-	return false
-}
-
 // DeprecationOf returns the deprecation guidance string, or "" when none.
 func (r *Registry) DeprecationOf(pkg, op string) string {
 	if m := r.LookupPackageFunc(pkg, op); m != nil {
@@ -1207,7 +1172,6 @@ func (bf *boundFunc) toMeta(kind, pkgName, typeName string) *FuncMeta {
 		HasError:     hasErr,
 		WantsCtx:     bf.wantsCtx,
 		WantsEnv:     bf.wantsEnv,
-		YieldAware:   bf.yieldAware,
 		Capabilities: append([]string(nil), bf.capability...),
 		Deprecated:   bf.deprecated,
 	}

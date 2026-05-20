@@ -217,9 +217,9 @@ func TestTC992_RiskScorePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	f, ok := v.Go().(float64)
+	f, ok := unwrap1(t, v).(float64)
 	if !ok {
-		t.Fatalf("want float64, got %T", v.Go())
+		t.Fatalf("want float64, got %T", unwrap1(t, v))
 	}
 	if f != 2.0 {
 		t.Fatalf("want 2.0, got %v", f)
@@ -254,9 +254,9 @@ func TestTC994_BuilderRoundTripRiskScore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	f, ok := v.Go().(float64)
+	f, ok := unwrap1(t, v).(float64)
 	if !ok {
-		t.Fatalf("want float64, got %T", v.Go())
+		t.Fatalf("want float64, got %T", unwrap1(t, v))
 	}
 	if f != 1.5 {
 		t.Fatalf("want 1.5, got %v", f)
@@ -280,7 +280,7 @@ func TestTC900_NullIsOwnType(t *testing.T) {
 	}
 }
 
-// --- TC-723 错误冒泡：foreach 内 host 返回 error 中断程序 ----------
+// --- TC-723 host error 显式解构后可作为普通 error 值处理 -------------
 func tc723Fail(i int64) (int64, error) {
 	if i == 2 {
 		return 0, werr.Newf(werr.CodeHost, "simulated at i=%d", i)
@@ -288,7 +288,7 @@ func tc723Fail(i int64) (int64, error) {
 	return i, nil
 }
 
-func TestTC723_ForeachHostErrorPropagates(t *testing.T) {
+func TestTC723_ForeachHostErrorIsExplicitValue(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.BindGoPackage("bail", registry.PackageSpec{
 		Functions: []registry.FuncSpec{
@@ -299,24 +299,23 @@ func TestTC723_ForeachHostErrorPropagates(t *testing.T) {
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	prog, err := eng.CompileJSON([]byte(`[
-		{"let":{"n":{"literal":{"type":"int64","value":"0"}}}},
-		{"foreach":{"target":{"literal":{"type":"array<int64>","value":[1,2,3]}},"as":"x","do":[
-			{"set":{"n":{"Fail":[{"pkg":"bail"},{"var":"x"}]}}}
+		{"let":{"result":{"literal":{"type":"null","value":null}}}},
+		{"foreach":{"target":{"literal":{"type":"array<int64>","value":[2]}},"as":"x","do":[
+			{"set":{"result":{"Fail":[{"pkg":"bail"},{"var":"x"}]}}}
 		]}},
-		{"return":{"var":"n"}}
+		{"return":{"var":"result"}}
 	]`))
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	_, err = prog.Run(context.Background(), wflang.RunOptions{})
-	if err == nil {
-		t.Fatal("want host error to propagate, got nil")
+	v, err := prog.Run(context.Background(), wflang.RunOptions{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	le, ok := err.(*werr.LangError)
-	if !ok {
-		t.Fatalf("want LangError, got %T", err)
+	if v.TypeName() != "tuple<int64,error>" {
+		t.Fatalf("want tuple<int64,error>, got %s %v", v.TypeName(), v.Go())
 	}
-	if !containsString(le.Message, "simulated at i=2") {
-		t.Fatalf("message should contain simulated at i=2: %q", le.Message)
+	if got := unwrapErr(t, v); got == nil || !containsString(got.(error).Error(), "simulated at i=2") {
+		t.Fatalf("want simulated at i=2 error value, got %v", got)
 	}
 }

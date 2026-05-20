@@ -150,7 +150,7 @@ func TestTC540_ToInt64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 42 {
+	if unwrap1(t, v).(int64) != 42 {
 		t.Fatalf("want 42, got %v", v.Go())
 	}
 }
@@ -163,7 +163,7 @@ func TestTC541_ToJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(string) != "7" {
+	if unwrap1(t, v).(string) != "7" {
 		t.Fatalf("want \"7\", got %v", v.Go())
 	}
 }
@@ -172,14 +172,14 @@ func TestTC541_ToJSON(t *testing.T) {
 
 func TestTC550_JSONRoundTrip(t *testing.T) {
 	src := []byte(`[
-		{"let":{"p":{"Parse":[{"pkg":"json"},{"literal":{"type":"string","value":"{\"a\":1}"}}]}}},
+		{"let":[["p","perr"], {"Parse":[{"pkg":"json"},{"literal":{"type":"string","value":"{\"a\":1}"}}]}]},
 		{"return":{"Stringify":[{"pkg":"json"},{"var":"p"}]}}
 	]`)
 	v, err := runSrc(t, src, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	got := v.Go().(string)
+	got := unwrap1(t, v).(string)
 	if got != `{"a":1}` {
 		t.Fatalf("want {\"a\":1}, got %s", got)
 	}

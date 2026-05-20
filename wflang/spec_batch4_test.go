@@ -158,14 +158,18 @@ func TestTC205_ExprDiscardsValue(t *testing.T) {
 	}
 }
 
-// --- TC-207 routine 必须是单个宿主调用 ----------------------------------
+// --- TC-207 routine 支持 do block ---------------------------------------
 
-func TestTC207_RoutineMustBeSingleCall(t *testing.T) {
-	// `{"routine":{"do":[...]}}` is the invalid form (do + list).
-	src := []byte(`[{"routine":{"do":[{"literal":{"type":"int64","value":"1"}}]}}]`)
-	_, err := runSrc(t, src, nil)
-	if err == nil {
-		t.Fatal("want error, got nil")
+func TestTC207_RoutineDoBlockReturnsHandle(t *testing.T) {
+	src := []byte(`[{"return":{"routine":{"do":[
+		{"return":{"literal":{"type":"int64","value":"1"}}}
+	]}}}]`)
+	v, err := runSrc(t, src, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != "routineHandle" {
+		t.Fatalf("want routineHandle, got %s", v.TypeName())
 	}
 }
 

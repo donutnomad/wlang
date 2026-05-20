@@ -86,6 +86,18 @@ type Let struct {
 	// populates it; consumers should iterate Bindings instead of using
 	// Name/Type/Expr directly.
 	Bindings []LetBinding
+	// Destructure, when non-nil, signals tuple destructuring (LANGUAGE.md §3.4.1):
+	// the right-hand expression must evaluate to a tuple<T1,...,Tn> and is
+	// projected element-wise into the Destructure.Names list. An entry of "_"
+	// discards the position without binding a variable. When Destructure is
+	// set, Bindings is empty and Expr holds the single right-hand expression.
+	Destructure *LetDestructure
+}
+
+// LetDestructure describes a tuple-destructuring let binding.
+type LetDestructure struct {
+	Names []string // "_" means discard
+	Types []string // optional per-name declared type ("" = inferred)
 }
 
 // Set assigns to an existing variable (inner-most search outwards).
@@ -144,20 +156,107 @@ type ExprStmt struct {
 	Expr Node
 }
 
-// Routine is a single host-call launched in a goroutine (§3.3 routine).
+// Routine launches code in a goroutine (§3.3 routine).
+//
+// Two body shapes are supported:
+//
+//   - Call != nil: a single host-call invocation form (legacy shape from when
+//     routines only supported a single call). The goroutine executes exactly
+//     that host call and the handle resolves with its return value.
+//   - Body != nil: a list of wflang statements that run in a child Executor.
+//     The last expression-yielding statement's value becomes the handle result
+//     (mirroring RunProgram semantics).
+//
+// Exactly one of Call/Body is set after parsing.
 type Routine struct {
+	Base
+	Call *Call
+	Body []Node
+}
+
+// Defer registers a host call to run in LIFO order when the enclosing block
+// scope exits (LANGUAGE.md §3.7). Arguments are evaluated at defer-time and
+// captured; the deferred call sees those captured snapshots, not the values at
+// the time of execution.
+type Defer struct {
 	Base
 	Call *Call
 }
 
-// Try captures errors raised inside Do and exposes them as a `error` typed
-// value bound to Bind in the Catch block (LANGUAGE.md §9.1 / §9.1.1).
-type Try struct {
+// MapLit builds a map<K,V> literal (LANGUAGE.md §2.1 / §3.8).
+//
+// KeyType / ValType name the map key and value types. Entries holds the
+// key/value pair expressions; both are evaluated at runtime. The parser
+// accepts {"map":{"type":["K","V"],"value":{"k1":expr,...}}} for string keys
+// and {"map":{"type":["K","V"],"entries":[[kExpr,vExpr],...]}} for non-string
+// keys (the latter is also accepted for string keys when programmatic
+// construction is needed).
+type MapLit struct {
 	Base
-	Do    []Node
-	Bind  string
-	Catch []Node
+	KeyType string
+	ValType string
+	Entries []MapEntry
 }
+
+// MapEntry is one key-value pair inside a MapLit.
+type MapEntry struct {
+	Key Node
+	Val Node
+}
+
+// StructLit instantiates an already-bound Go struct type (LANGUAGE.md §3.9).
+// TypeName must match a type registered via Registry.BindType / AutoBindType.
+// Field names are case-sensitive Go field names; unset fields keep their Go
+// zero values.
+type StructLit struct {
+	Base
+	TypeName string
+	Fields   []StructField
+}
+
+// StructField is one field initializer inside a StructLit.
+type StructField struct {
+	Name string
+	Expr Node
+}
+
+// ChanLit builds a chan<T> value (LANGUAGE.md §3.10).
+// ElemType is the element type name. Buffer, when non-nil, is evaluated at
+// runtime and must yield an int64; nil means an unbuffered channel.
+type ChanLit struct {
+	Base
+	ElemType string
+	Buffer   Node
+}
+
+// SelectStmt implements Go-style select (LANGUAGE.md §3.10.2).
+//
+// Each case is either a send, recv, or default. Exactly one case may be a
+// default. recv cases optionally bind the received value (and ok flag) into
+// new variables visible in the case body.
+type SelectStmt struct {
+	Base
+	Cases   []SelectCase
+	Default []Node // nil when no default branch
+}
+
+// SelectCase is one arm of a select statement.
+type SelectCase struct {
+	Kind     SelectCaseKind
+	Chan     Node   // for both send and recv
+	SendExpr Node   // send: expression to send
+	BindVal  string // recv: variable for received value (optional, "_" discards)
+	BindOK   string // recv: variable for ok flag (optional, "_" discards)
+	Do       []Node
+}
+
+// SelectCaseKind discriminates a SelectCase.
+type SelectCaseKind int
+
+const (
+	SelectCaseRecv SelectCaseKind = iota
+	SelectCaseSend
+)
 
 // MatchCase is a single arm of a match expression: `when` is the value to
 // compare to the scrutinee; `do` is the statement block to evaluate on hit.

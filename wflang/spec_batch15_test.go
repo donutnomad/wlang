@@ -59,7 +59,7 @@ func TestTC420_TwoArgsResultError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 10 {
+	if unwrap1(t, v).(int64) != 10 {
 		t.Fatalf("want 10, got %v", v.Go())
 	}
 }
@@ -99,7 +99,7 @@ func TestTC421_CtxFirstArg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 42 {
+	if unwrap1(t, v).(int64) != 42 {
 		t.Fatalf("want 42, got %v", v.Go())
 	}
 	// ctx was propagated from program.Run.
@@ -136,14 +136,17 @@ func TestTC445_CtxCancelInterrupts(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err = prog.Run(ctx, wflang.RunOptions{})
-	if err == nil {
-		t.Fatal("want timeout err, got nil")
+	v, err := prog.Run(ctx, wflang.RunOptions{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		// Ok if wrapped; check message substring.
-		if !containsString(err.Error(), "deadline") && !containsString(err.Error(), "canceled") {
-			t.Fatalf("want deadline/canceled in err, got %v", err)
+	got, ok := v.Go().(error)
+	if !ok || got == nil {
+		t.Fatalf("want deadline error value, got %s %v", v.TypeName(), v.Go())
+	}
+	if !errors.Is(got, context.DeadlineExceeded) {
+		if !containsString(got.Error(), "deadline") && !containsString(got.Error(), "canceled") {
+			t.Fatalf("want deadline/canceled error value, got %v", got)
 		}
 	}
 }

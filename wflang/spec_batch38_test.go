@@ -68,9 +68,9 @@ func TestTC1001_AnyGoTypeIsBindable(t *testing.T) {
 	// Pointer receiver, embedded promotion, and aliased types resolve
 	// under a single program. Each call must succeed.
 	src := []byte(`[
-	  {"let":{"a":{"Add":[{"var":"calc"},{"literal":{"type":"int64","value":"5"}}]}}},
-	  {"let":{"b":{"Tick":[{"var":"counter"}]}}},
-	  {"let":{"g":{"Hello":[{"var":"calc"}]}}},
+	  {"let":[["a","aerr"], {"Add":[{"var":"calc"},{"literal":{"type":"int64","value":"5"}}]}]},
+	  {"let":[["b","berr"], {"Tick":[{"var":"counter"}]}]},
+	  {"let":[["g","gerr"], {"Hello":[{"var":"calc"}]}]},
 	  {"return":{"+":[
 	     {"var":"a"},
 	     {"var":"b"}
@@ -271,18 +271,22 @@ func TestTC1009_UpperDSLLowersToWflangAndRoundTrips(t *testing.T) {
 	}
 	cb := wflang.NewConfigBuilder(reg)
 
-	// Upper DSL form: cb.Call(pkg, "Triple", lit(7)) + cb.Lit(...) ≡
-	//   {"return": {"+": [{"Triple": [{"pkg":"tc1009pkg"}, lit 7]}, lit 1]}}
-	body := cb.Program().Return(
-		cb.Call(nil, "+",
+	// Upper DSL form lowers a host call into explicit tuple destructuring.
+	body := []wflang.Node{map[string]any{
+		"let": []any{
+			[]any{"triple", "err"},
 			cb.Call(cb.Pkg("tc1009pkg"), "Triple", cb.Lit("int64", "7")),
+		},
+	}, map[string]any{
+		"return": cb.Call(nil, "+",
+			map[string]any{"var": "triple"},
 			cb.Lit("int64", "1"),
 		),
-	)
+	}}
 	// `+` must accept the receiver-less form: drop the leading nil.
-	stripNilRecv(body.Nodes())
+	stripNilRecv(body)
 
-	raw, err := body.JSON()
+	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("builder JSON: %v", err)
 	}

@@ -47,8 +47,13 @@ var builtinKeywords = map[string]bool{
 	"panic":    true,
 	"expr":     true,
 	"routine":  true,
+	"await":    true,
 	"array":    true,
-	"try":      true,
+	"defer":    true,
+	"map":      true,
+	"struct":   true,
+	"chan":     true,
+	"select":   true,
 	// Logical / boolean operators
 	"and": true,
 	"or":  true,
@@ -217,10 +222,20 @@ func parseNodeWithKey(key string, body any, path string) (ast.Node, error) {
 		return &ast.ExprStmt{Base: ast.Base{P: nodePath}, Expr: expr}, nil
 	case "routine":
 		return parseRoutine(body, nodePath)
+	case "await":
+		return parseAwait(body, nodePath)
 	case "array":
 		return parseArrayLit(body, nodePath)
-	case "try":
-		return parseTry(body, nodePath)
+	case "defer":
+		return parseDefer(body, nodePath)
+	case "map":
+		return parseMapLit(body, nodePath)
+	case "struct":
+		return parseStructLit(body, nodePath)
+	case "chan":
+		return parseChanLit(body, nodePath)
+	case "select":
+		return parseSelect(body, nodePath)
 	case "match":
 		return parseMatch(body, nodePath)
 	}
@@ -405,20 +420,25 @@ func parseIf(body any, path string) (ast.Node, error) {
 	return &ast.IfStmt{Base: ast.Base{P: path}, Cond: cond, Then: thenNodes, Else: elseNodes}, nil
 }
 
-// parseLet handles the three accepted shapes of `let` (LANGUAGE.md §3.4):
+// parseLet handles the accepted shapes of `let` (LANGUAGE.md §3.4):
 //
 //  1. Untyped single binding: {"let": {"x": <expr>}}.
-//  2. Destructuring (TC-231): {"let": {"x": <expr>, "y": <expr>, ...}}.
+//  2. Destructuring multi-binding (TC-231): {"let": {"x": <expr>, ...}}.
 //  3. Typed binding (TC-232) — two equivalent forms per §3.4:
 //     a. Sibling reserved key: {"let": {"@type": T, "x": <expr>}}.
 //     b. Wrapped binding value: {"let": {"x": {"type": T, "value": <expr>}}}.
-//     Form (b) is the canonical spec form; form (a) is the legacy ergonomic
-//     form, kept working for programs already using it.
+//  4. Tuple destructure (LANGUAGE.md §3.4.1): {"let": [["v","err"], <expr>]}
+//     — the right-hand expression must evaluate to a tuple<T1,...,Tn> at
+//     runtime. An entry of "_" discards the matching position.
 func parseLet(body any, path string) (ast.Node, error) {
+	// Tuple destructure form: array of [names, expr] (LANGUAGE.md §3.4.1).
+	if arr, ok := body.([]any); ok {
+		return parseLetDestructure(arr, path)
+	}
 	m, ok := body.(map[string]any)
 	if !ok {
 		return nil, werr.Newf(werr.CodeASTShape,
-			"let body must be object").WithPath(path)
+			"let body must be object or tuple-destructure array").WithPath(path)
 	}
 	// Form (a): legacy `@type` sibling key applies to the (single) binding.
 	siblingType, _ := m["@type"].(string)
@@ -480,6 +500,72 @@ func parseLet(body any, path string) (ast.Node, error) {
 		out.Expr = out.Bindings[0].Expr
 	}
 	return out, nil
+}
+
+// parseLetDestructure decodes the tuple-destructure form of let. The body is
+// [names, expr] or [names, types, expr]. names is an array of strings (use
+// "_" to discard a position); types, when present, is a parallel array of
+// optional declared type names ("" = inferred).
+func parseLetDestructure(arr []any, path string) (ast.Node, error) {
+	if len(arr) != 2 && len(arr) != 3 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"let tuple-destructure expects [names, expr] or [names, types, expr], got %d",
+			len(arr)).WithPath(path)
+	}
+	rawNames, ok := arr[0].([]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"let destructure first element must be a names array").WithPath(path)
+	}
+	if len(rawNames) == 0 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"let destructure names array cannot be empty").WithPath(path)
+	}
+	names := make([]string, len(rawNames))
+	for i, rn := range rawNames {
+		s, ok := rn.(string)
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"let destructure name at %d must be string, got %T", i, rn).WithPath(path)
+		}
+		names[i] = s
+	}
+	declTypes := make([]string, len(names))
+	exprIdx := 1
+	if len(arr) == 3 {
+		rawTypes, ok := arr[1].([]any)
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"let destructure types element must be an array").WithPath(path)
+		}
+		if len(rawTypes) != len(names) {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"let destructure types length %d != names length %d",
+				len(rawTypes), len(names)).WithPath(path)
+		}
+		for i, rt := range rawTypes {
+			s, ok := rt.(string)
+			if !ok {
+				return nil, werr.Newf(werr.CodeASTShape,
+					"let destructure type at %d must be string, got %T", i, rt).
+					WithPath(path)
+			}
+			declTypes[i] = s
+		}
+		exprIdx = 2
+	}
+	expr, err := parseExpr(arr[exprIdx], path+"/expr")
+	if err != nil {
+		return nil, err
+	}
+	return &ast.Let{
+		Base: ast.Base{P: path},
+		Expr: expr,
+		Destructure: &ast.LetDestructure{
+			Names: names,
+			Types: declTypes,
+		},
+	}, nil
 }
 
 // typedBindingWrapper is the {"type":T, "value":expr} form per §3.4.
@@ -654,39 +740,25 @@ func parseMatch(body any, path string) (ast.Node, error) {
 	}, nil
 }
 
-// parseTry parses a try/catch statement: {"try": {"do":[...], "bind":"err", "catch":[...]}}.
-func parseTry(body any, path string) (ast.Node, error) {
-	m, ok := body.(map[string]any)
-	if !ok {
-		return nil, werr.Newf(werr.CodeASTShape,
-			"try body must be object").WithPath(path)
-	}
-	do, err := parseStatements(toArr(m["do"]), path+"/do")
-	if err != nil {
-		return nil, err
-	}
-	bind, _ := m["bind"].(string)
-	if bind == "" {
-		bind = "err"
-	}
-	catch, err := parseStatements(toArr(m["catch"]), path+"/catch")
-	if err != nil {
-		return nil, err
-	}
-	return &ast.Try{Base: ast.Base{P: path}, Do: do, Bind: bind, Catch: catch}, nil
-}
-
 func parseRoutine(body any, path string) (ast.Node, error) {
-	// routine body must be a single host call object.
 	m, ok := body.(map[string]any)
 	if !ok {
 		return nil, werr.Newf(werr.CodeASTShape,
-			"routine body must be a single host call object").WithPath(path)
+			"routine body must be a single host call or {do:[stmts]} block").WithPath(path)
 	}
-	if _, ok := m["do"]; ok {
-		return nil, werr.Newf(werr.CodeASTShape,
-			"routine body must be a single host call object, not a do-block").WithPath(path)
+	// Body form: {"routine": {"do": [stmts...]}}.
+	if rawDo, ok := m["do"]; ok {
+		if len(m) != 1 {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"routine {do} form must not have sibling keys").WithPath(path)
+		}
+		stmts, err := parseStatements(toArr(rawDo), path+"/do")
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Routine{Base: ast.Base{P: path}, Body: stmts}, nil
 	}
+	// Legacy call form: single-key object that is a host call.
 	keys := sortedKeys(m)
 	if len(keys) != 1 {
 		return nil, werr.Newf(werr.CodeASTShape,
@@ -702,6 +774,292 @@ func parseRoutine(body any, path string) (ast.Node, error) {
 			"routine must wrap a host call, got %T", node).WithPath(path)
 	}
 	return &ast.Routine{Base: ast.Base{P: path}, Call: call}, nil
+}
+
+// parseDefer parses {"defer": <hostCall>} (LANGUAGE.md §3.7).
+func parseDefer(body any, path string) (ast.Node, error) {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"defer body must be a single host call object").WithPath(path)
+	}
+	keys := sortedKeys(m)
+	if len(keys) != 1 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"defer body must have exactly one key, got %d", len(keys)).WithPath(path)
+	}
+	node, err := parseNodeWithKey(keys[0], m[keys[0]], path+"/"+keys[0])
+	if err != nil {
+		return nil, err
+	}
+	call, ok := node.(*ast.Call)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"defer requires a host call expression, got %T", node).WithPath(path)
+	}
+	return &ast.Defer{Base: ast.Base{P: path}, Call: call}, nil
+}
+
+// parseMapLit parses {"map":{"type":["K","V"],"value":{...}}} and the
+// alternative entries form {"map":{"type":["K","V"],"entries":[[k,v],...]}}.
+func parseMapLit(body any, path string) (ast.Node, error) {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"map body must be object").WithPath(path)
+	}
+	rawType, _ := m["type"].([]any)
+	if len(rawType) != 2 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"map.type must be [K, V]").WithPath(path)
+	}
+	kType, _ := rawType[0].(string)
+	vType, _ := rawType[1].(string)
+	if kType == "" || vType == "" {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"map.type must be [K,V] strings").WithPath(path)
+	}
+	if !isMapKeyType(kType) {
+		return nil, werr.Newf(werr.CodeType,
+			"map key type %q not allowed (use string or intN/uintN)", kType).WithPath(path)
+	}
+	out := &ast.MapLit{Base: ast.Base{P: path}, KeyType: kType, ValType: vType}
+	// Entries form first.
+	if rawEntries, ok := m["entries"]; ok {
+		arr, ok := rawEntries.([]any)
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"map.entries must be an array").WithPath(path)
+		}
+		for i, raw := range arr {
+			pair, ok := raw.([]any)
+			if !ok || len(pair) != 2 {
+				return nil, werr.Newf(werr.CodeASTShape,
+					"map.entries[%d] must be [k,v]", i).WithPath(path)
+			}
+			sub := fmt.Sprintf("%s/entries/%d", path, i)
+			k, err := parseExpr(pair[0], sub+"/0")
+			if err != nil {
+				return nil, err
+			}
+			v, err := parseExpr(pair[1], sub+"/1")
+			if err != nil {
+				return nil, err
+			}
+			out.Entries = append(out.Entries, ast.MapEntry{Key: k, Val: v})
+		}
+		return out, nil
+	}
+	// value form: requires string keys (the JSON object is the literal map).
+	rawValue, _ := m["value"].(map[string]any)
+	if rawValue != nil {
+		if kType != types.TString {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"map.value object form requires K=string, got K=%s; use map.entries for non-string keys",
+				kType).WithPath(path)
+		}
+		// Deterministic order so JSON map non-determinism does not affect runs.
+		keys := sortedKeys(rawValue)
+		for _, k := range keys {
+			sub := fmt.Sprintf("%s/value/%s", path, k)
+			v, err := parseExpr(rawValue[k], sub)
+			if err != nil {
+				return nil, err
+			}
+			keyLit := &ast.Literal{
+				Base:  ast.Base{P: sub + "/_key"},
+				Value: types.NewValue(types.TString, k),
+			}
+			out.Entries = append(out.Entries, ast.MapEntry{Key: keyLit, Val: v})
+		}
+		return out, nil
+	}
+	// No entries/value → empty map literal.
+	return out, nil
+}
+
+func isMapKeyType(k string) bool {
+	switch k {
+	case types.TString,
+		types.TInt8, types.TInt16, types.TInt32, types.TInt64,
+		types.TUint8, types.TUint16, types.TUint32, types.TUint64:
+		return true
+	}
+	return false
+}
+
+// parseStructLit parses {"struct": ["TypeName", {field:expr,...}]}.
+func parseStructLit(body any, path string) (ast.Node, error) {
+	arr, ok := body.([]any)
+	if !ok || len(arr) != 2 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"struct body must be [typeName, fields-object]").WithPath(path)
+	}
+	typName, _ := arr[0].(string)
+	if typName == "" {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"struct[0] must be a non-empty type name").WithPath(path)
+	}
+	fm, ok := arr[1].(map[string]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"struct[1] must be {field:expr,...}").WithPath(path)
+	}
+	out := &ast.StructLit{Base: ast.Base{P: path}, TypeName: typName}
+	for _, name := range sortedKeys(fm) {
+		sub := fmt.Sprintf("%s/%s", path, name)
+		expr, err := parseExpr(fm[name], sub)
+		if err != nil {
+			return nil, err
+		}
+		out.Fields = append(out.Fields, ast.StructField{Name: name, Expr: expr})
+	}
+	return out, nil
+}
+
+// parseChanLit parses {"chan": ["T", bufExpr?]} where bufExpr defaults to 0.
+func parseChanLit(body any, path string) (ast.Node, error) {
+	arr, ok := body.([]any)
+	if !ok || len(arr) < 1 || len(arr) > 2 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"chan body must be [elemType] or [elemType, bufferExpr]").WithPath(path)
+	}
+	elem, _ := arr[0].(string)
+	if elem == "" {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"chan[0] must be element type name").WithPath(path)
+	}
+	out := &ast.ChanLit{Base: ast.Base{P: path}, ElemType: elem}
+	if len(arr) == 2 {
+		buf, err := parseExpr(arr[1], path+"/1")
+		if err != nil {
+			return nil, err
+		}
+		out.Buffer = buf
+	}
+	return out, nil
+}
+
+// parseSelect parses {"select": [{"case":{...}}, ..., {"default":[stmts]}]}.
+//
+// Each non-default case body shape:
+//   - recv: {"case":{"recv":[chExpr], "bind":["v","ok"], "do":[stmts]}}
+//   - send: {"case":{"send":[chExpr, valExpr], "do":[stmts]}}
+//
+// The bind array elements can be "" or "_" to discard. Both elements are
+// optional individually.
+func parseSelect(body any, path string) (ast.Node, error) {
+	arr, ok := body.([]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"select body must be an array of cases").WithPath(path)
+	}
+	out := &ast.SelectStmt{Base: ast.Base{P: path}}
+	for i, raw := range arr {
+		csub := fmt.Sprintf("%s/%d", path, i)
+		cm, ok := raw.(map[string]any)
+		if !ok || len(cm) != 1 {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"select case must have exactly one key (case|default)").WithPath(csub)
+		}
+		for k, v := range cm {
+			switch k {
+			case "default":
+				if out.Default != nil {
+					return nil, werr.Newf(werr.CodeASTShape,
+						"select has multiple default branches").WithPath(csub)
+				}
+				stmts, err := parseStatements(toArr(v), csub+"/default")
+				if err != nil {
+					return nil, err
+				}
+				out.Default = stmts
+			case "case":
+				inner, ok := v.(map[string]any)
+				if !ok {
+					return nil, werr.Newf(werr.CodeASTShape,
+						"select case body must be object").WithPath(csub)
+				}
+				sc := ast.SelectCase{}
+				switch {
+				case inner["recv"] != nil:
+					sc.Kind = ast.SelectCaseRecv
+					rec, ok := inner["recv"].([]any)
+					if !ok || len(rec) != 1 {
+						return nil, werr.Newf(werr.CodeASTShape,
+							"select recv must be [chanExpr]").WithPath(csub + "/recv")
+					}
+					ch, err := parseExpr(rec[0], csub+"/recv/0")
+					if err != nil {
+						return nil, err
+					}
+					sc.Chan = ch
+					if rawBind, ok := inner["bind"]; ok {
+						bindArr, ok := rawBind.([]any)
+						if !ok || len(bindArr) > 2 {
+							return nil, werr.Newf(werr.CodeASTShape,
+								"select recv bind must be 0-2 names").WithPath(csub + "/bind")
+						}
+						if len(bindArr) >= 1 {
+							sc.BindVal, _ = bindArr[0].(string)
+						}
+						if len(bindArr) == 2 {
+							sc.BindOK, _ = bindArr[1].(string)
+						}
+					}
+				case inner["send"] != nil:
+					sc.Kind = ast.SelectCaseSend
+					snd, ok := inner["send"].([]any)
+					if !ok || len(snd) != 2 {
+						return nil, werr.Newf(werr.CodeASTShape,
+							"select send must be [chanExpr, valExpr]").WithPath(csub + "/send")
+					}
+					ch, err := parseExpr(snd[0], csub+"/send/0")
+					if err != nil {
+						return nil, err
+					}
+					val, err := parseExpr(snd[1], csub+"/send/1")
+					if err != nil {
+						return nil, err
+					}
+					sc.Chan = ch
+					sc.SendExpr = val
+				default:
+					return nil, werr.Newf(werr.CodeASTShape,
+						"select case requires recv or send").WithPath(csub)
+				}
+				do, err := parseStatements(toArr(inner["do"]), csub+"/do")
+				if err != nil {
+					return nil, err
+				}
+				sc.Do = do
+				out.Cases = append(out.Cases, sc)
+			default:
+				return nil, werr.Newf(werr.CodeASTShape,
+					"unknown select branch key %q (want case|default)", k).WithPath(csub)
+			}
+		}
+	}
+	return out, nil
+}
+
+func parseAwait(body any, path string) (ast.Node, error) {
+	if arr, ok := body.([]any); ok {
+		items := make([]ast.Node, 0, len(arr))
+		for i, it := range arr {
+			n, err := parseNode(it, fmt.Sprintf("%s/%d", path, i))
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, n)
+		}
+		return &ast.Call{Base: ast.Base{P: path}, Op: "await", Args: items}, nil
+	}
+	n, err := parseNode(body, path+"/0")
+	if err != nil {
+		return nil, err
+	}
+	return &ast.Call{Base: ast.Base{P: path}, Op: "await", Args: []ast.Node{n}}, nil
 }
 
 func parseArrayLit(body any, path string) (ast.Node, error) {

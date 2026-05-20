@@ -27,14 +27,18 @@ func (e *Executor) Eval(n ast.Node) (types.Value, error) {
 		return e.evalArray(x)
 	case *ast.IfStmt:
 		return e.evalIfExpr(x)
+	case *ast.Routine:
+		return e.evalRoutine(x)
 	case *ast.Call:
 		return e.evalCall(x)
-	case *ast.Try:
-		// try used in expression position: fold return/last-value, propagate panic.
-		v, _, err := e.execTry(x)
-		return v, err
 	case *ast.Match:
 		return e.evalMatch(x)
+	case *ast.StructLit:
+		return e.evalStructLit(x)
+	case *ast.MapLit:
+		return e.evalMapLit(x)
+	case *ast.ChanLit:
+		return e.evalChanLit(x)
 	}
 	return types.Value{}, werr.Newf(werr.CodeASTShape,
 		"cannot evaluate %T as expression", n).WithPath(nodePath(n))
@@ -165,32 +169,62 @@ func (e *Executor) evalBlock(stmts []ast.Node) (types.Value, error) {
 
 // ---------- Call dispatch ----------
 
+type preparedHostCall struct {
+	op   string
+	recv types.Value
+	args []types.Value
+	path string
+}
+
 func (e *Executor) evalCall(c *ast.Call) (types.Value, error) {
 	// Arguments are evaluated left-to-right.
 	if handler, ok := builtinOps[c.Op]; ok {
 		return handler(e, c)
 	}
-	// Host call: first argument decides receiver kind.
-	if len(c.Args) == 0 {
-		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"call %q requires at least a receiver argument", c.Op).WithPath(c.Path())
-	}
-	// Enforce MaxCallDepth (§10.1 / TC-801) around host invocation. Builtin
-	// arithmetic/compare ops are exempt — they don't recurse via the registry.
-	if e.budget.MaxCallDepth > 0 {
-		e.callDepth++
-		defer func() { e.callDepth-- }()
-		if e.callDepth > e.budget.MaxCallDepth {
-			return types.Value{}, werr.Newf(werr.CodeBudget,
-				"MaxCallDepth exceeded (%d)", e.budget.MaxCallDepth).WithPath(c.Path())
-		}
-	}
-	recv, err := e.Eval(c.Args[0])
+	exit, err := e.enterHostCall(c.Path())
 	if err != nil {
 		return types.Value{}, err
 	}
+	defer exit()
+	call, err := e.prepareHostCall(c)
+	if err != nil {
+		return types.Value{}, err
+	}
+	return e.invokePreparedHostCall(call)
+}
+
+func (e *Executor) enterHostCall(path string) (func(), error) {
+	// Enforce MaxCallDepth (§10.1 / TC-801) around the whole host call
+	// lifecycle, including receiver and argument evaluation. Nested host calls
+	// appear while evaluating arguments.
+	if e.budget.MaxCallDepth <= 0 {
+		return func() {}, nil
+	}
+	e.callDepth++
+	if e.callDepth > e.budget.MaxCallDepth {
+		e.callDepth--
+		return nil, werr.Newf(werr.CodeBudget,
+			"MaxCallDepth exceeded (%d)", e.budget.MaxCallDepth).WithPath(path)
+	}
+	return func() { e.callDepth-- }, nil
+}
+
+func (e *Executor) prepareHostCall(c *ast.Call) (preparedHostCall, error) {
+	if _, ok := builtinOps[c.Op]; ok {
+		return preparedHostCall{}, werr.Newf(werr.CodeASTShape,
+			"host call required, got builtin operator %q", c.Op).WithPath(c.Path())
+	}
+	// Host call: first argument decides receiver kind.
+	if len(c.Args) == 0 {
+		return preparedHostCall{}, werr.Newf(werr.CodeASTShape,
+			"call %q requires at least a receiver argument", c.Op).WithPath(c.Path())
+	}
+	recv, err := e.Eval(c.Args[0])
+	if err != nil {
+		return preparedHostCall{}, err
+	}
 	if e.registry == nil {
-		return types.Value{}, werr.Newf(werr.CodeSymbol,
+		return preparedHostCall{}, werr.Newf(werr.CodeSymbol,
 			"no registry available for call %q", c.Op).WithPath(c.Path())
 	}
 	// Evaluate remaining arguments.
@@ -198,11 +232,15 @@ func (e *Executor) evalCall(c *ast.Call) (types.Value, error) {
 	for _, a := range c.Args[1:] {
 		av, err := e.Eval(a)
 		if err != nil {
-			return types.Value{}, err
+			return preparedHostCall{}, err
 		}
 		args = append(args, av)
 	}
-	return e.registry.Invoke(e.ctx, c.Op, recv, args, c.Path())
+	return preparedHostCall{op: c.Op, recv: recv, args: args, path: c.Path()}, nil
+}
+
+func (e *Executor) invokePreparedHostCall(c preparedHostCall) (types.Value, error) {
+	return e.registry.Invoke(e.ctx, c.op, c.recv, c.args, c.path)
 }
 
 // ---------- Built-in operators ----------
@@ -226,10 +264,63 @@ func init() {
 		"and":        logicalAnd,
 		"or":         logicalOr,
 		"!":          logicalNot,
+		"await":      awaitOp,
 		"contains":   stringBinOp("contains"),
 		"startsWith": stringBinOp("startsWith"),
 		"endsWith":   stringBinOp("endsWith"),
+		"m.get":      mapGet,
+		"m.set":      mapSet,
+		"m.del":      mapDel,
+		"m.has":      mapHas,
+		"m.len":      mapLen,
+		"m.keys":     mapKeys,
+		"m.values":   mapValues,
+		"ch.send":    chanSend,
+		"ch.recv":    chanRecv,
+		"ch.close":   chanClose,
+		"ch.len":     chanLen,
+		"ch.cap":     chanCap,
 	}
+}
+
+func awaitOp(e *Executor, c *ast.Call) (types.Value, error) {
+	if len(c.Args) == 0 {
+		return types.Value{}, werr.New(werr.CodeASTShape,
+			"await requires at least one routine handle").WithPath(c.Path())
+	}
+	if len(c.Args) == 1 {
+		h, err := evalRoutineHandle(e, c.Args[0], c.Path())
+		if err != nil {
+			return types.Value{}, err
+		}
+		return h.Wait(e.ctx)
+	}
+	out := make([]types.Value, 0, len(c.Args))
+	for _, arg := range c.Args {
+		h, err := evalRoutineHandle(e, arg, c.Path())
+		if err != nil {
+			return types.Value{}, err
+		}
+		v, err := h.Wait(e.ctx)
+		if err != nil {
+			return types.Value{}, err
+		}
+		out = append(out, types.NewValue(types.TAny, v.Go()))
+	}
+	return types.NewArray(types.TAny, out)
+}
+
+func evalRoutineHandle(e *Executor, n ast.Node, path string) (*RoutineHandle, error) {
+	v, err := e.Eval(n)
+	if err != nil {
+		return nil, err
+	}
+	h, ok := v.Go().(*RoutineHandle)
+	if !ok || v.TypeName() != RoutineHandleType {
+		return nil, werr.Newf(werr.CodeType,
+			"await requires routineHandle, got %s", v.TypeName()).WithPath(path)
+	}
+	return h, nil
 }
 
 func evalArgs(e *Executor, args []ast.Node) ([]types.Value, error) {

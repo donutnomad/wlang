@@ -109,7 +109,7 @@ func TestTC424_CtxPlusVariadic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 10 {
+	if unwrap1(t, v).(int64) != 10 {
 		t.Fatalf("want 10, got %v", v.Go())
 	}
 	if tc424Seen == nil {
@@ -160,8 +160,8 @@ func TestTC442_CtxSharedAcrossCalls(t *testing.T) {
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	// Call A and B in sequence; the result is A + B = 3 (sanity only).
 	prog, err := eng.CompileJSON([]byte(`[
-		{"let":{"a":{"A":[{"pkg":"share"}]}}},
-		{"let":{"b":{"B":[{"pkg":"share"}]}}},
+		{"let":[["a","aerr"], {"A":[{"pkg":"share"}]}]},
+		{"let":[["b","berr"], {"B":[{"pkg":"share"}]}]},
 		{"return":{"+":[{"var":"a"},{"var":"b"}]}}
 	]`))
 	if err != nil {

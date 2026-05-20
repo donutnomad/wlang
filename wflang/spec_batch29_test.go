@@ -52,15 +52,11 @@ func TestTC830_TraceCapturesEvents(t *testing.T) {
 }
 
 // ---------- TC-831 Explain 报告完整 -------------------------------------
-func tc831Yieldy(token string) (int64, error) {
-	return 0, wflang.NewYield(token, nil)
-}
-
 func TestTC831_ExplainReportsSurface(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.BindGoPackage("svc", registry.PackageSpec{
 		Functions: []registry.FuncSpec{
-			{GoName: "Yieldy", Impl: tc831Yieldy, Pure: false},
+			{GoName: "Echo", Impl: func(s string) (string, error) { return s, nil }, Pure: false},
 		},
 	}); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -68,14 +64,10 @@ func TestTC831_ExplainReportsSurface(t *testing.T) {
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	src := []byte(`[
 		{"let":{"x":{"var":"input"}}},
-		{"routine":{"Yieldy":[
+		{"routine":{"Echo":[
 			{"pkg":"svc"},
 			{"literal":{"type":"string","value":"tok"}}]}},
-		{"try":{
-			"do":[{"return":{"var":"x"}}],
-			"bind":"e",
-			"catch":[{"return":{"literal":{"type":"int64","value":"0"}}}]
-		}}
+		{"return":{"var":"x"}}
 	]`)
 	prog, err := eng.CompileJSON(src)
 	if err != nil {
@@ -94,17 +86,14 @@ func TestTC831_ExplainReportsSurface(t *testing.T) {
 	if !r.HasRoutines {
 		t.Fatalf("Explain missed routine flag")
 	}
-	if !r.HasTry {
-		t.Fatalf("Explain missed try flag")
-	}
-	hasYieldy := false
+	hasEcho := false
 	for _, op := range r.Operators {
-		if op == "Yieldy" {
-			hasYieldy = true
+		if op == "Echo" {
+			hasEcho = true
 		}
 	}
-	if !hasYieldy {
-		t.Fatalf("Explain missed `Yieldy` operator: %v", r.Operators)
+	if !hasEcho {
+		t.Fatalf("Explain missed `Echo` operator: %v", r.Operators)
 	}
 }
 
@@ -133,6 +122,46 @@ func TestTC832_DumpASTRoundTrip(t *testing.T) {
 	if string(dumped) != string(dumped2) {
 		t.Fatalf("dump not stable:\n--- first ---\n%s\n--- second ---\n%s",
 			dumped, dumped2)
+	}
+}
+
+func TestDumpAST_AwaitRoundTrip(t *testing.T) {
+	reg := wflang.DefaultRegistry()
+	if err := reg.BindGoPackage("svc", registry.PackageSpec{
+		Functions: []registry.FuncSpec{
+			{GoName: "Echo", Impl: func(s string) (string, error) { return s, nil }},
+		},
+	}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	src := []byte(`[
+		{"let":{"h":{"routine":{"Echo":[{"pkg":"svc"},{"literal":{"type":"string","value":"ok"}}]}}}},
+		{"return":{"await":{"var":"h"}}}
+	]`)
+	prog, err := eng.CompileJSON(src)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	dumped, err := wflang.DumpAST(prog)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	prog2, err := eng.CompileJSON(dumped)
+	if err != nil {
+		t.Fatalf("compile dumped: %v\n%s", err, dumped)
+	}
+	v, err := prog2.Run(context.Background(), wflang.RunOptions{})
+	if err != nil {
+		t.Fatalf("run dumped: %v", err)
+	}
+	// Routine wraps host call; await yields tuple<string,error>.
+	if v.TypeName() != "tuple<string,error>" {
+		t.Fatalf("got %s %v", v.TypeName(), v.Go())
+	}
+	parts := v.Go().([]any)
+	if parts[0] != "ok" || parts[1] != nil {
+		t.Fatalf("got %v", parts)
 	}
 }
 

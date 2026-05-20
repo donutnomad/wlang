@@ -278,6 +278,12 @@ func buildTypedSlice(elem string, elems []Value) any {
 	}
 }
 
+// MapType returns map<K,V>.
+func MapType(k, v string) string { return "map<" + k + "," + v + ">" }
+
+// ChanType returns chan<T>.
+func ChanType(elem string) string { return "chan<" + elem + ">" }
+
 // TupleType returns tuple<...>.
 func TupleType(elems []string) string {
 	var sb strings.Builder

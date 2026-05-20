@@ -42,7 +42,7 @@ func TestStdlib_ToInt64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 123 {
+	if unwrap1(t, v).(int64) != 123 {
 		t.Fatalf("want int64=123, got %v", v.Go())
 	}
 }
@@ -62,7 +62,7 @@ func TestStdlib_ToFloat64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(float64) != 3.14 {
+	if unwrap1(t, v).(float64) != 3.14 {
 		t.Fatalf("want 3.14, got %v", v.Go())
 	}
 }
@@ -217,7 +217,7 @@ func TestStdlib_JSONStringify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(string) != "42" {
+	if unwrap1(t, v).(string) != "42" {
 		t.Fatalf("want \"42\", got %v", v.Go())
 	}
 }

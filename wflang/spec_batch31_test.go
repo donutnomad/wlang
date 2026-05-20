@@ -5,8 +5,8 @@
 //	§4.2.3   tuple from multi-return        TC-321
 //	§5.3     Env injection                  TC-422
 //	§5.8     CallPlan identity              TC-481, TC-672
-//	§7.7     YieldAware flag on CallPlan    TC-674
-//	§8.3     ResumeYield aliases            TC-706, TC-707
+//	§7.7     CallPlan routine surface        TC-674
+//	§8.3     await aliases                   TC-706, TC-707
 //	§10.3    host type method exposure      TC-812
 //	§13.2    deprecation table / migrator   TC-882, TC-883
 //	§13.3    feature gate (typedArray)      TC-884
@@ -60,20 +60,20 @@ func TestTC321_MultiReturnTuple(t *testing.T) {
 	if !strings.HasPrefix(tn, "tuple<") || !strings.HasSuffix(tn, ">") {
 		t.Fatalf("want tuple<...>, got %s", tn)
 	}
-	// All four business types must appear in declaration order.
-	for _, want := range []string{"tc321Book", "int64", "boolean", "string"} {
+	// All four business types plus the trailing error slot must appear in declaration order.
+	for _, want := range []string{"tc321Book", "int64", "boolean", "string", "error"} {
 		if !strings.Contains(tn, want) {
 			t.Fatalf("tuple type missing %s: %s", want, tn)
 		}
 	}
 	parts, ok := v.Go().([]any)
-	if !ok || len(parts) != 4 {
+	if !ok || len(parts) != 5 {
 		t.Fatalf("tuple shape: %v", v.Go())
 	}
 	if b, ok := parts[0].(*tc321Book); !ok || b.ID != 1 {
 		t.Fatalf("part 0: %v", parts[0])
 	}
-	if parts[1].(int64) != 42 || !parts[2].(bool) || parts[3].(string) != "ok" {
+	if parts[1].(int64) != 42 || !parts[2].(bool) || parts[3].(string) != "ok" || parts[4] != nil {
 		t.Fatalf("parts: %v", parts)
 	}
 }
@@ -110,7 +110,7 @@ func TestTC422_EnvInjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got, ok := v.Go().(bool); !ok || !got {
+	if got, ok := unwrap1(t, v).(bool); !ok || !got || unwrapErr(t, v) != nil {
 		t.Fatalf("env did not inject capability set: %v (%T)", v.Go(), v.Go())
 	}
 }
@@ -193,21 +193,16 @@ func TestTC672_CallPlanFieldsComplete(t *testing.T) {
 	if len(p.Capabilities) != 1 || p.Capabilities[0] != "svc:math" {
 		t.Fatalf("caps: %v", p.Capabilities)
 	}
-	if p.YieldAware {
-		t.Fatalf("YieldAware should default false")
-	}
 }
 
-// ---------- TC-674 routine yield_aware -----------------------------------
-// (§7.7) When the registry marks a function YieldAware, the compiled CallPlan
-// surfaces YieldAware=true so tooling can validate routine usage.
-func tc674Wait(token string) error { return wflang.NewYield(token, nil) }
+// ---------- TC-674 routine call plan -----------------------------------
+func tc674Wait(token string) (string, error) { return token, nil }
 
-func TestTC674_CallPlanYieldAware(t *testing.T) {
+func TestTC674_CallPlanSeesRoutineHostCall(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.BindGoPackage("svc", registry.PackageSpec{
 		Functions: []registry.FuncSpec{
-			{GoName: "Wait", Impl: tc674Wait, Pure: false, YieldAware: true},
+			{GoName: "Wait", Impl: tc674Wait, Pure: false},
 		},
 	}); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -227,90 +222,63 @@ func TestTC674_CallPlanYieldAware(t *testing.T) {
 	}
 	saw := false
 	for _, p := range plans {
-		if p.Operator == "Wait" && p.YieldAware {
+		if p.Operator == "Wait" && len(p.ReturnTypes) == 1 && p.ReturnTypes[0] == "string" {
 			saw = true
 		}
 	}
 	if !saw {
-		t.Fatalf("want YieldAware=true on Wait, got %+v", plans)
+		t.Fatalf("want Wait call plan, got %+v", plans)
 	}
 }
 
-// ---------- TC-706 / TC-707 ResumeYield aliases ----------------------------
-// These overlap with TC-405/407 (covered in batch 28) but the spec asks them
-// to be addressed under §8.3 explicitly. We exercise the exact §8.3 contract:
-// multi-return → tuple, ResumeInput.Err → error.
+// ---------- TC-706 / TC-707 await aliases --------------------------------
 type tc28Worker2 struct{}
 
 func (*tc28Worker2) WaitTwo(token string) (string, int64, error) {
-	return "", int64(0), wflang.NewYield(token, nil)
+	return token, int64(len(token)), nil
 }
 
 func (*tc28Worker2) WaitS(token string) (string, error) {
-	return "", wflang.NewYield(token, "payload-"+token)
+	return "", errors.New("upstream")
 }
 
-func runTC706Yield(t *testing.T, body string) (*wflang.Session, wflang.YieldState) {
+func runTC706Await(t *testing.T, body string) (wflang.Value, error) {
 	t.Helper()
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType((*tc28Worker2)(nil)); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
-	yieldCh := make(chan wflang.YieldState, 1)
-	sess, err := eng.NewSession(wflang.SessionOptions{
-		Vars: map[string]any{"w": &tc28Worker2{}},
-		RoutineYieldHandler: func(ctx context.Context, y wflang.YieldState) {
-			yieldCh <- y
-		},
-	})
+	prog, err := eng.CompileJSON([]byte(body))
 	if err != nil {
-		t.Fatalf("session: %v", err)
+		t.Fatalf("compile: %v", err)
 	}
-	if _, err := sess.AppendRun(t.Context(), []byte(body)); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	select {
-	case y := <-yieldCh:
-		return sess, y
-	case <-time.After(2 * time.Second):
-		t.Fatalf("yield never observed")
-	}
-	return nil, wflang.YieldState{}
+	return prog.Run(t.Context(), wflang.RunOptions{Vars: map[string]any{"w": &tc28Worker2{}}})
 }
 
-func TestTC706_ResumeYieldTuple(t *testing.T) {
-	sess, y := runTC706Yield(t, `[
-		{"routine":{"WaitTwo":[{"var":"w"},{"literal":{"type":"string","value":"t706"}}]}}
+func TestTC706_AwaitTuple(t *testing.T) {
+	v, err := runTC706Await(t, `[
+		{"let":{"h":{"routine":{"WaitTwo":[{"var":"w"},{"literal":{"type":"string","value":"t706"}}]}}}},
+		{"return":{"await":{"var":"h"}}}
 	]`)
-	if len(y.ReturnTypes) != 2 {
-		t.Fatalf("ReturnTypes: %v", y.ReturnTypes)
-	}
-	v, err := sess.ResumeYield(wflang.ResumeInput{
-		Token: "t706",
-		Results: []wflang.Value{
-			wflang.MustValue("string", "abc"),
-			wflang.MustValue("int64", int64(7)),
-		},
-	})
 	if err != nil {
-		t.Fatalf("resume: %v", err)
+		t.Fatalf("await: %v", err)
 	}
 	if !strings.HasPrefix(v.TypeName(), "tuple<") {
 		t.Fatalf("not tuple: %s", v.TypeName())
 	}
 }
 
-func TestTC707_ResumeYieldErrInjection(t *testing.T) {
-	sess, _ := runTC706Yield(t, `[
-		{"routine":{"WaitS":[{"var":"w"},{"literal":{"type":"string","value":"t707"}}]}}
+func TestTC707_AwaitRoutineErrorValue(t *testing.T) {
+	v, err := runTC706Await(t, `[
+		{"let":{"h":{"routine":{"WaitS":[{"var":"w"},{"literal":{"type":"string","value":"t707"}}]}}}},
+		{"return":{"await":{"var":"h"}}}
 	]`)
-	_, err := sess.ResumeYield(wflang.ResumeInput{
-		Token: "t707",
-		Err:   errors.New("upstream"),
-	})
-	if err == nil || !strings.Contains(err.Error(), "upstream") {
-		t.Fatalf("want injected error, got %v", err)
+	if err != nil {
+		t.Fatalf("await: %v", err)
+	}
+	if got := unwrapErr(t, v); got == nil || !strings.Contains(got.(error).Error(), "upstream") {
+		t.Fatalf("want routine error value, got %v", got)
 	}
 }
 

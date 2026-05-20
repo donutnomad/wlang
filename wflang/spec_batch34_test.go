@@ -66,7 +66,7 @@ func TestTC360_AutoBindType_Constructor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	got, _ := v.Go().(string)
+	got, _ := unwrap1(t, v).(string)
 	if got != "1.23" {
 		t.Fatalf("Format result = %q, want \"1.23\"", got)
 	}
@@ -118,7 +118,7 @@ func TestTC361_ExcludeMethod(t *testing.T) {
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	// PublicMethod must work.
 	src1 := []byte(`{"lang":"wflang/v1","program":[
-	  {"let":{"b":{"MakeBox":[{"pkg":"tc361pkg"},{"literal":{"type":"int64","value":"10"}}]}}},
+	  {"let":[["b","err"], {"MakeBox":[{"pkg":"tc361pkg"},{"literal":{"type":"int64","value":"10"}}]}]},
 	  {"return":{"PublicMethod":[{"var":"b"}]}}
 	]}`)
 	prog, err := eng.CompileJSON(src1)
@@ -129,12 +129,12 @@ func TestTC361_ExcludeMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run1: %v", err)
 	}
-	if v.Go().(int64) != 11 {
+	if unwrap1(t, v).(int64) != 11 {
 		t.Fatalf("PublicMethod = %v, want 11", v.Go())
 	}
 	// InternalMethod must be unbound → E_SYMBOL.
 	src2 := []byte(`{"lang":"wflang/v1","program":[
-	  {"let":{"b":{"MakeBox":[{"pkg":"tc361pkg"},{"literal":{"type":"int64","value":"10"}}]}}},
+	  {"let":[["b","err"], {"MakeBox":[{"pkg":"tc361pkg"},{"literal":{"type":"int64","value":"10"}}]}]},
 	  {"return":{"InternalMethod":[{"var":"b"}]}}
 	]}`)
 	prog2, err := eng.CompileJSON(src2)
@@ -237,7 +237,7 @@ func TestTC363_TypeLevelCapabilityRequired(t *testing.T) {
 	}
 
 	src := []byte(`{"lang":"wflang/v1","program":[
-	  {"let":{"v":{"Make":[{"pkg":"tc363pkg"},{"literal":{"type":"string","value":"top"}}]}}},
+	  {"let":[["v","err"], {"Make":[{"pkg":"tc363pkg"},{"literal":{"type":"string","value":"top"}}]}]},
 	  {"return":{"Read":[{"var":"v"}]}}
 	]}`)
 
@@ -266,7 +266,7 @@ func TestTC363_TypeLevelCapabilityRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run2: %v", err)
 	}
-	if v.Go().(string) != "top" {
+	if unwrap1(t, v).(string) != "top" {
 		t.Fatalf("got %v, want top", v.Go())
 	}
 }

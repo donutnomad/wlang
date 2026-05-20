@@ -2,10 +2,10 @@ package wflang_test
 
 import (
 	"context"
-	"errors"
 	"math/big"
 	"testing"
 
+	"github.com/wflang/wflang/registry"
 	"github.com/wflang/wflang/wflang"
 )
 
@@ -117,28 +117,31 @@ func TestTC650_AmbiguousOverload(t *testing.T) {
 	expectCode(t, err, "E_AMBIGUOUS_OVERLOAD")
 }
 
-// --- TC-700 YieldError 接口契约 ------------------------------------
-// The NewYield helper must return an error that also implements YieldError,
-// with the token/payload accessible through the interface.
-func TestTC700_YieldErrorContract(t *testing.T) {
-	err := wflang.NewYield("my-token", map[string]any{"k": "v"})
-	if err == nil {
-		t.Fatal("NewYield returned nil")
+// --- TC-700 routine handle 契约 ------------------------------------
+// A routine expression returns a typed handle that await can resolve later.
+func TestTC700_RoutineHandleContract(t *testing.T) {
+	reg := wflang.DefaultRegistry()
+	if err := reg.BindGoPackage("svc", registry.PackageSpec{
+		Functions: []registry.FuncSpec{
+			{GoName: "Echo", Impl: func(s string) (string, error) { return s, nil }},
+		},
+	}); err != nil {
+		t.Fatalf("bind: %v", err)
 	}
-	var ye wflang.YieldError
-	if !errors.As(err, &ye) {
-		t.Fatalf("NewYield did not return a YieldError: %T", err)
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON([]byte(`[
+		{"let":{"h":{"routine":{"Echo":[{"pkg":"svc"},{"literal":{"type":"string","value":"ok"}}]}}}},
+		{"return":{"var":"h"}}
+	]`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
 	}
-	if ye.Token() != "my-token" {
-		t.Fatalf("token: want my-token, got %q", ye.Token())
+	v, err := prog.Run(context.Background(), wflang.RunOptions{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	m, ok := ye.Payload().(map[string]any)
-	if !ok || m["k"] != "v" {
-		t.Fatalf("payload: want map{k:v}, got %#v", ye.Payload())
-	}
-	// Error() message should include the token so logs are meaningful.
-	if !containsString(err.Error(), "my-token") {
-		t.Fatalf("Error() should include token: %q", err.Error())
+	if v.TypeName() != "routineHandle" {
+		t.Fatalf("want routineHandle, got %s", v.TypeName())
 	}
 }
 

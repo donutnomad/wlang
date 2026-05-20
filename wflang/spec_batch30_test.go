@@ -16,6 +16,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,7 +73,7 @@ func TestTC080_BindGoPackageRegisterAndCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	b, ok := v.Go().(*tc080Book)
+	b, ok := unwrap1(t, v).(*tc080Book)
 	if !ok || b.ID != 1001 {
 		t.Fatalf("want *tc080Book{ID:1001}, got %v (%T)", v.Go(), v.Go())
 	}
@@ -173,7 +174,7 @@ func TestTC086_AutoBindTypeReflectsMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got := v.Go().(string); got != "ran:!!!" {
+	if got := unwrap1(t, v).(string); got != "ran:!!!" {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -255,31 +256,29 @@ func TestTC088_OverloadDispatchExactInt8(t *testing.T) {
 
 // TC-091 已在 overload_test.go 中覆盖，此处略去。
 
-// ---------- TC-093 前台调用 yield error 按普通 error 处理 ---------------
-func tc093Yieldy() (int64, error) { return 0, wflang.NewYield("fg-tok", nil) }
+// ---------- TC-093 前台调用 host error 按普通 error 处理 ---------------
+func tc093Fail() (int64, error) { return 0, errors.New("fg-error") }
 
-func TestTC093_ForegroundYieldErrorTreatedAsError(t *testing.T) {
+func TestTC093_ForegroundHostErrorTreatedAsError(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.BindGoPackage("fg", registry.PackageSpec{
 		Functions: []registry.FuncSpec{
-			{GoName: "Yieldy", Impl: tc093Yieldy, Pure: false},
+			{GoName: "Fail", Impl: tc093Fail, Pure: false},
 		},
 	}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
-	prog, err := eng.CompileJSON([]byte(`[{"return":{"Yieldy":[{"pkg":"fg"}]}}]`))
+	prog, err := eng.CompileJSON([]byte(`[{"return":{"Fail":[{"pkg":"fg"}]}}]`))
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	_, err = prog.Run(t.Context(), wflang.RunOptions{})
-	if err == nil {
-		t.Fatalf("foreground yield should bubble as error")
+	v, err := prog.Run(t.Context(), wflang.RunOptions{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	// It surfaces as a runtime error, not as a yielded session state.
-	// We accept any non-nil error here; the contract is "no special handling".
-	if !strings.Contains(err.Error(), "fg-tok") && !strings.Contains(err.Error(), "yield") {
-		t.Fatalf("expected yield trace in error, got %v", err)
+	if got := unwrapErr(t, v); got == nil || !strings.Contains(got.(error).Error(), "fg-error") {
+		t.Fatalf("expected host error value, got %v", got)
 	}
 }
 
@@ -348,12 +347,16 @@ func TestTC208_RoutineReturnsNullImmediately(t *testing.T) {
 	}
 }
 
-// ---------- TC-209 routine error 进入 RoutineErrorHandler ----------------
-type tc209Bad struct{}
+// ---------- TC-209 routine host error 是普通结果值 ------------------------
+type tc209Bad struct{ hits *atomic.Int32 }
 
-func (*tc209Bad) Boom() error { return errors.New("bad thing") }
+func (b *tc209Bad) Boom() error {
+	b.hits.Add(1)
+	return errors.New("bad thing")
+}
 
-func TestTC209_RoutineErrorReachesHandler(t *testing.T) {
+func TestTC209_Batch30RoutineHostErrorIsResultValue(t *testing.T) {
+	var hits atomic.Int32
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType((*tc209Bad)(nil)); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -361,7 +364,7 @@ func TestTC209_RoutineErrorReachesHandler(t *testing.T) {
 	gotErr := make(chan error, 1)
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	sess, err := eng.NewSession(wflang.SessionOptions{
-		Vars: map[string]any{"b": &tc209Bad{}},
+		Vars: map[string]any{"b": &tc209Bad{hits: &hits}},
 		RoutineErrorHandler: func(_ context.Context, e error) {
 			gotErr <- e
 		},
@@ -376,52 +379,45 @@ func TestTC209_RoutineErrorReachesHandler(t *testing.T) {
 	if _, err := sess.AppendRun(t.Context(), src); err != nil {
 		t.Fatalf("append: %v", err)
 	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return hits.Load() == 1
+	})
 	select {
 	case e := <-gotErr:
-		if !strings.Contains(e.Error(), "bad thing") {
-			t.Fatalf("want bad thing, got %v", e)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("RoutineErrorHandler never fired")
+		t.Fatalf("handler got ordinary host error result: %v", e)
+	default:
 	}
 }
 
-// ---------- TC-210 routine yield 进入 RoutineYieldHandler ----------------
+// ---------- TC-210 routine handle 可 await ----------------
 type tc210Y struct{}
 
 func (*tc210Y) Wait(token string) (int64, error) {
-	return 0, wflang.NewYield(token, nil)
+	return int64(len(token)), nil
 }
 
-func TestTC210_RoutineYieldReachesHandler(t *testing.T) {
+func TestTC210_RoutineAwaitGetsResult(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType((*tc210Y)(nil)); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	gotY := make(chan wflang.YieldState, 1)
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	sess, err := eng.NewSession(wflang.SessionOptions{
 		Vars: map[string]any{"y": &tc210Y{}},
-		RoutineYieldHandler: func(_ context.Context, y wflang.YieldState) {
-			gotY <- y
-		},
 	})
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
 	src := []byte(`[
-		{"routine":{"Wait":[{"var":"y"},{"literal":{"type":"string","value":"t-210"}}]}}
+		{"let":{"h":{"routine":{"Wait":[{"var":"y"},{"literal":{"type":"string","value":"t-210"}}]}}}},
+		{"return":{"await":{"var":"h"}}}
 	]`)
-	if _, err := sess.AppendRun(t.Context(), src); err != nil {
+	v, err := sess.AppendRun(t.Context(), src)
+	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	select {
-	case y := <-gotY:
-		if y.Token != "t-210" {
-			t.Fatalf("token: %q", y.Token)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("RoutineYieldHandler never fired")
+	if v.TypeName() != "tuple<int64,error>" || unwrap1(t, v).(int64) != 5 || unwrapErr(t, v) != nil {
+		t.Fatalf("want tuple<int64,error>{5,nil}, got %s %v", v.TypeName(), v.Go())
 	}
 }
 
@@ -529,7 +525,7 @@ func TestTC483_ConformanceCoexistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 102 {
+	if unwrap1(t, v).(int64) != 102 {
 		t.Fatalf("conformance: want 102, got %v", v.Go())
 	}
 }

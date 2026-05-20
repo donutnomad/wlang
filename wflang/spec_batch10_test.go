@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	werr "github.com/wflang/wflang/errors"
 	"github.com/wflang/wflang/wflang"
 )
 
@@ -45,7 +44,7 @@ func TestTC089_SafeNumericWidening(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 11 {
+	if unwrap1(t, v).(int64) != 11 {
 		t.Fatalf("want AddInt64 (=11), got %v", v.Go())
 	}
 }
@@ -77,7 +76,7 @@ func TestTC090_AnyFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(string) != "ok" {
+	if unwrap1(t, v).(string) != "ok" {
 		t.Fatalf("want ok, got %v", v.Go())
 	}
 }
@@ -104,7 +103,7 @@ func TestTC320_SingleBusinessReturn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 7 {
+	if unwrap1(t, v).(int64) != 7 {
 		t.Fatalf("want 7, got %v", v.Go())
 	}
 }
@@ -131,12 +130,12 @@ func TestTC322_OnlyErrorReturn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.TypeName() != "null" {
-		t.Fatalf("want null, got %s", v.TypeName())
+	if v.TypeName() != "error" || v.Go() != nil {
+		t.Fatalf("want nil error value, got %s %v", v.TypeName(), v.Go())
 	}
 }
 
-// --- TC-324 error != nil 默认中断 ---------------------------------------
+// --- TC-324 error != nil 作为 tuple 末位返回 -----------------------------
 
 type FailingCall struct{}
 
@@ -144,7 +143,7 @@ var errBoom = errors.New("boom")
 
 func (FailingCall) Do() (int64, error) { return 0, errBoom }
 
-func TestTC324_ErrorShortCircuits(t *testing.T) {
+func TestTC324_ErrorReturnedInTuple(t *testing.T) {
 	reg := wflang.NewRegistry()
 	if err := reg.AutoBindType(FailingCall{}); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -154,21 +153,17 @@ func TestTC324_ErrorShortCircuits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	_, err = prog.Run(context.Background(), wflang.RunOptions{
+	v, err := prog.Run(context.Background(), wflang.RunOptions{
 		Vars: map[string]any{"f": FailingCall{}},
 	})
-	if err == nil {
-		t.Fatal("want short-circuit error, got nil")
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	// Error should carry the original as Cause via LangError chain.
-	var le *werr.LangError
-	if errors.As(err, &le) && le.Cause != nil {
-		if !errors.Is(le.Cause, errBoom) {
-			// Accept either wrapped or direct.
-			if le.Cause.Error() != errBoom.Error() {
-				t.Fatalf("cause mismatch: %v", le.Cause)
-			}
-		}
+	if v.TypeName() != "tuple<int64,error>" {
+		t.Fatalf("want tuple<int64,error>, got %s %v", v.TypeName(), v.Go())
+	}
+	if got := unwrapErr(t, v); !errors.Is(got.(error), errBoom) {
+		t.Fatalf("want boom error value, got %v", got)
 	}
 }
 
@@ -201,7 +196,7 @@ func TestTC342_IfBranchTypesDifferent(t *testing.T) {
 		// E_TYPE at compile-time is also spec-accepted.
 		return
 	}
-	if v.Go().(int64) != 1 {
+	if unwrap1(t, v).(int64) != 1 {
 		t.Fatalf("want 1 (then branch), got %v", v.Go())
 	}
 }
@@ -215,7 +210,7 @@ func TestTC503_StrFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(string) != "hi bob" {
+	if unwrap1(t, v).(string) != "hi bob" {
 		t.Fatalf("want hi bob, got %v", v.Go())
 	}
 }
@@ -229,7 +224,7 @@ func TestTC530_PathHas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(bool) != true {
+	if unwrap1(t, v).(bool) != true {
 		t.Fatalf("Has: want true, got %v", v.Go())
 	}
 	// Missing key → false.
@@ -238,7 +233,7 @@ func TestTC530_PathHas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run miss: %v", err)
 	}
-	if v.Go().(bool) != false {
+	if unwrap1(t, v).(bool) != false {
 		t.Fatalf("Has miss: want false, got %v", v.Go())
 	}
 }

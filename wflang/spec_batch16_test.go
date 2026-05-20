@@ -93,7 +93,7 @@ func TestTC423_VariadicArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 10 {
+	if unwrap1(t, v).(int64) != 10 {
 		t.Fatalf("want 10, got %v", v.Go())
 	}
 }
@@ -236,13 +236,13 @@ func TestTC651_OperatorNotFound(t *testing.T) {
 	}
 }
 
-// --- TC-720 (T, nil) 求值得到 T --------------------------------------
+// --- TC-720 (T, nil) 求值得到 tuple<T,error> --------------------------
 
 type tc720Give struct{}
 
 func (tc720Give) Get() (int64, error) { return 42, nil }
 
-func TestTC720_TErrNilGivesT(t *testing.T) {
+func TestTC720_TErrNilGivesTuple(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType(tc720Give{}); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -258,21 +258,21 @@ func TestTC720_TErrNilGivesT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 42 {
+	if unwrap1(t, v).(int64) != 42 {
 		t.Fatalf("want 42, got %v", v.Go())
 	}
-	if v.TypeName() != "int64" {
-		t.Fatalf("want int64, got %s", v.TypeName())
+	if v.TypeName() != "tuple<int64,error>" || unwrapErr(t, v) != nil {
+		t.Fatalf("want tuple<int64,error>{42,nil}, got %s %v", v.TypeName(), v.Go())
 	}
 }
 
-// --- TC-721 (zero, err) 默认短路 --------------------------------------
+// --- TC-721 (zero, err) 返回 tuple 末位 error ---------------------------
 
 type tc721Fail struct{}
 
 func (tc721Fail) Go() (int64, error) { return 0, errors.New("down") }
 
-func TestTC721_TErrNonNilShortCircuits(t *testing.T) {
+func TestTC721_TErrNonNilReturnsTuple(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType(tc721Fail{}); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -282,32 +282,28 @@ func TestTC721_TErrNonNilShortCircuits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	_, err = prog.Run(context.Background(), wflang.RunOptions{
+	v, err := prog.Run(context.Background(), wflang.RunOptions{
 		Vars: map[string]any{"f": tc721Fail{}},
 	})
-	if err == nil {
-		t.Fatal("want short-circuit err, got nil")
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(err.Error(), "down") {
-		t.Fatalf("want 'down' in err, got %v", err)
+	if got := unwrapErr(t, v); got == nil || !strings.Contains(got.(error).Error(), "down") {
+		t.Fatalf("want 'down' error value, got %v", got)
 	}
 }
 
-// --- TC-722 try 启用后 error 变 typed value --------------------------
+// --- TC-722 error 值可显式解构后调用 Error ----------------------------
 
-func TestTC722_TryConvertsErrorToTyped(t *testing.T) {
+func TestTC722_DestructuredErrorValueHasMethods(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType(tc721Fail{}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
-	// try wraps Go(f); catch returns err.Error().
 	src := []byte(`[
-		{"try":{"do":[
-			{"expr":{"Go":[{"var":"f"}]}}
-		],"bind":"err","catch":[
-			{"return":{"Error":[{"var":"err"}]}}
-		]}}
+		{"let":[["v","err"], {"Go":[{"var":"f"}]}]},
+		{"return":{"Error":[{"var":"err"}]}}
 	]`)
 	prog, err := eng.CompileJSON(src)
 	if err != nil {
@@ -389,9 +385,13 @@ func TestTC806_CtxDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err = prog.Run(ctx, wflang.RunOptions{})
-	if err == nil {
-		t.Fatal("want deadline, got nil")
+	v, err := prog.Run(ctx, wflang.RunOptions{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got, ok := v.Go().(error)
+	if !ok || got == nil || !strings.Contains(got.Error(), "deadline") {
+		t.Fatalf("want deadline error value, got %s %v", v.TypeName(), v.Go())
 	}
 }
 

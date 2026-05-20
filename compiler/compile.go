@@ -264,20 +264,18 @@ func foldNode(n ast.Node) (ast.Node, error) {
 			x.Step = step
 		}
 		return x, foldBlock(x.Do)
-	case *ast.Try:
-		if err := foldBlock(x.Do); err != nil {
-			return nil, err
-		}
-		return x, foldBlock(x.Catch)
 	case *ast.Routine:
-		c, err := foldNode(x.Call)
-		if err != nil {
-			return nil, err
+		if x.Call != nil {
+			c, err := foldNode(x.Call)
+			if err != nil {
+				return nil, err
+			}
+			if cc, ok := c.(*ast.Call); ok {
+				x.Call = cc
+			}
+			return x, nil
 		}
-		if cc, ok := c.(*ast.Call); ok {
-			x.Call = cc
-		}
-		return x, nil
+		return x, foldBlock(x.Body)
 	case *ast.Array:
 		for i, item := range x.Items {
 			f, err := foldNode(item)

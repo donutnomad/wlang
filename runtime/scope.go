@@ -18,10 +18,20 @@ type varBinding struct {
 	declaredType string
 }
 
+// deferredCall captures a host call with its receiver/arguments snapshot, to
+// be executed in LIFO order when the enclosing scope unwinds (LANGUAGE.md §3.7).
+type deferredCall struct {
+	op   string
+	recv types.Value
+	args []types.Value
+	path string
+}
+
 // Scope is a single lexical scope frame (§2.3).
 type Scope struct {
-	parent *Scope
-	vars   map[string]*varBinding
+	parent   *Scope
+	vars     map[string]*varBinding
+	deferred []deferredCall
 }
 
 // NewScope creates an empty root scope.
@@ -29,6 +39,24 @@ func NewScope() *Scope { return &Scope{vars: map[string]*varBinding{}} }
 
 // Push returns a child scope.
 func (s *Scope) Push() *Scope { return &Scope{parent: s, vars: map[string]*varBinding{}} }
+
+// PushDeferred records a deferred host call on this scope frame.
+func (s *Scope) PushDeferred(op string, recv types.Value, args []types.Value, path string) {
+	s.deferred = append(s.deferred, deferredCall{op: op, recv: recv, args: args, path: path})
+}
+
+// PopDeferred returns the deferred calls slice in LIFO order and clears it.
+func (s *Scope) PopDeferred() []deferredCall {
+	if len(s.deferred) == 0 {
+		return nil
+	}
+	out := make([]deferredCall, len(s.deferred))
+	for i, d := range s.deferred {
+		out[len(s.deferred)-1-i] = d
+	}
+	s.deferred = nil
+	return out
+}
 
 // Pop returns the parent scope (used when leaving a block). The current scope
 // is discarded, so any variables created here do not leak upward (TC-196).

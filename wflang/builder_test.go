@@ -59,8 +59,16 @@ func TestBuilder_GenerateAndRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(float64) != 20 {
-		t.Fatalf("want 20, got %v", v.Go())
+	// Score returns (float64, error) so host call yields tuple<float64,error>.
+	parts, ok := v.Go().([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("want tuple<float64,error>, got %T: %v", v.Go(), v.Go())
+	}
+	if parts[0].(float64) != 20 {
+		t.Fatalf("want 20, got %v", parts[0])
+	}
+	if parts[1] != nil {
+		t.Fatalf("want nil err, got %v", parts[1])
 	}
 }
 

@@ -111,23 +111,16 @@ func TestTC677_DeadBranchElimination(t *testing.T) {
 	}
 }
 
-// --- TC-724 try 捕获停止冒泡 ------------------------------------------
+// --- TC-724 诊断错误继续冒泡 ------------------------------------------
 
-func TestTC724_TryCatchStopsBubble(t *testing.T) {
-	// The `do` block adds int64 + string — a type error. `try` captures and
-	// bubbling stops; program returns 99.
+func TestTC724_DiagnosticErrorBubbles(t *testing.T) {
 	src := []byte(`[
-		{"try":{"do":[
-			{"expr":{"+":[{"literal":{"type":"int64","value":"1"}},{"literal":{"type":"string","value":"x"}}]}}
-		],"bind":"err","catch":[]}},
+		{"expr":{"+":[{"literal":{"type":"int64","value":"1"}},{"literal":{"type":"string","value":"x"}}]}},
 		{"return":{"literal":{"type":"int64","value":"99"}}}
 	]`)
-	v, err := runSrc(t, src, nil)
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if v.Go().(int64) != 99 {
-		t.Fatalf("want 99, got %v", v.Go())
+	_, err := runSrc(t, src, nil)
+	if err == nil {
+		t.Fatal("want type error, got nil")
 	}
 }
 

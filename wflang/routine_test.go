@@ -14,6 +14,15 @@ import (
 type publisher struct {
 	mu    sync.Mutex
 	calls int
+	boom  chan struct{}
+}
+
+func (p *publisher) Echo(s string) (string, error) {
+	return "echo:" + s, nil
+}
+
+func (p *publisher) EchoAfterSignal(s string) (string, error) {
+	return "echo:" + s, nil
 }
 
 func (p *publisher) Publish(s string) (int64, error) {
@@ -24,14 +33,180 @@ func (p *publisher) Publish(s string) (int64, error) {
 }
 
 func (p *publisher) Boom(s string) (int64, error) {
+	if p.boom != nil {
+		close(p.boom)
+	}
 	return 0, errors.New("routine fail")
 }
 
-func (p *publisher) Yieldy(s string) (int64, error) {
-	return 0, wflang.NewYield("tok-1", map[string]any{"kind": "async"})
+func (p *publisher) Pair(s string) (string, int64, error) {
+	return s, int64(len(s)), nil
 }
 
-// TC-208 routine 单调用立即返回 null
+func (p *publisher) NoValue(s string) error {
+	return nil
+}
+
+func TestRoutineAwaitSingleHandle(t *testing.T) {
+	reg := wflang.DefaultRegistry()
+	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	pub := &publisher{}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON([]byte(`[
+		{"let":{"h":{"routine":{"Echo":[{"var":"p"},{"literal":{"type":"string","value":"hi"}}]}}}},
+		{"return":{"await":{"var":"h"}}}
+	]`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	v, err := prog.Run(context.Background(), wflang.RunOptions{
+		Vars: map[string]any{"p": pub},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != "tuple<string,error>" || unwrap1(t, v) != "echo:hi" || unwrapErr(t, v) != nil {
+		t.Fatalf("want tuple<string,error>{echo:hi,nil}, got %s %v", v.TypeName(), v.Go())
+	}
+}
+
+func TestRoutineCapturesArgumentsBeforeLaunch(t *testing.T) {
+	reg := wflang.DefaultRegistry()
+	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	pub := &publisher{}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON([]byte(`[
+		{"let":{"token":{"literal":{"type":"string","value":"before"}}}},
+		{"let":{"h":{"routine":{"EchoAfterSignal":[{"var":"p"},{"var":"token"}]}}}},
+		{"set":{"token":{"literal":{"type":"string","value":"after"}}}},
+		{"return":{"await":{"var":"h"}}}
+	]`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	v, err := prog.Run(context.Background(), wflang.RunOptions{
+		Vars: map[string]any{"p": pub},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != "tuple<string,error>" || unwrap1(t, v) != "echo:before" || unwrapErr(t, v) != nil {
+		t.Fatalf("want tuple<string,error>{echo:before,nil}, got %s %v", v.TypeName(), v.Go())
+	}
+}
+
+func TestRoutineAwaitManyHandles(t *testing.T) {
+	reg := wflang.DefaultRegistry()
+	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	pub := &publisher{}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON([]byte(`[
+		{"let":{"a":{"routine":{"Echo":[{"var":"p"},{"literal":{"type":"string","value":"a"}}]}}}},
+		{"let":{"b":{"routine":{"Echo":[{"var":"p"},{"literal":{"type":"string","value":"bb"}}]}}}},
+		{"return":{"await":[{"var":"a"},{"var":"b"}]}}
+	]`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	v, err := prog.Run(context.Background(), wflang.RunOptions{
+		Vars: map[string]any{"p": pub},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != "array<any>" {
+		t.Fatalf("want array<any>, got %s", v.TypeName())
+	}
+	got, ok := v.Go().([]any)
+	if !ok || len(got) != 2 {
+		t.Fatalf("unexpected await results: %T %#v", v.Go(), v.Go())
+	}
+	first, ok := got[0].([]any)
+	if !ok || len(first) != 2 || first[0] != "echo:a" || first[1] != nil {
+		t.Fatalf("first await result: %T %#v", got[0], got[0])
+	}
+	second, ok := got[1].([]any)
+	if !ok || len(second) != 2 || second[0] != "echo:bb" || second[1] != nil {
+		t.Fatalf("second await result: %T %#v", got[1], got[1])
+	}
+}
+
+func TestRoutineAwaitReturnsErrorValue(t *testing.T) {
+	reg := wflang.DefaultRegistry()
+	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	pub := &publisher{}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON([]byte(`[
+		{"let":{"h":{"routine":{"Boom":[{"var":"p"},{"literal":{"type":"string","value":"x"}}]}}}},
+		{"return":{"await":{"var":"h"}}}
+	]`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	v, err := prog.Run(context.Background(), wflang.RunOptions{
+		Vars: map[string]any{"p": pub},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != "tuple<int64,error>" {
+		t.Fatalf("want tuple<int64,error>, got %s %v", v.TypeName(), v.Go())
+	}
+	if got := unwrapErr(t, v); got == nil || got.(error).Error() != "routine fail" {
+		t.Fatalf("want routine fail error value, got %v", got)
+	}
+}
+
+func TestRoutineAwaitCanRepeat(t *testing.T) {
+	reg := wflang.DefaultRegistry()
+	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	pub := &publisher{}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON([]byte(`[
+		{"let":{"h":{"routine":{"Pair":[{"var":"p"},{"literal":{"type":"string","value":"abc"}}]}}}},
+		{"let":{"first":{"await":{"var":"h"}}}},
+		{"let":{"second":{"await":{"var":"h"}}}},
+		{"return":{"==":[{"var":"first"},{"var":"second"}]}}
+	]`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	v, err := prog.Run(context.Background(), wflang.RunOptions{
+		Vars: map[string]any{"p": pub},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != "boolean" || v.Go() != true {
+		t.Fatalf("want boolean true, got %s %v", v.TypeName(), v.Go())
+	}
+}
+
+func TestAwaitRejectsNonHandle(t *testing.T) {
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: wflang.DefaultRegistry()})
+	prog, err := eng.CompileJSON([]byte(`[
+		{"return":{"await":{"literal":{"type":"int64","value":"1"}}}}
+	]`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	_, err = prog.Run(context.Background(), wflang.RunOptions{})
+	if err == nil {
+		t.Fatalf("want non-handle await error, got nil")
+	}
+}
+
+// TC-208 routine 单调用立即返回 handle and continues
 func TestTC208_RoutineFireAndForget(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
@@ -64,13 +239,13 @@ func TestTC208_RoutineFireAndForget(t *testing.T) {
 	})
 }
 
-// TC-209 routine error 进入 RoutineErrorHandler
-func TestTC209_RoutineErrorHandler(t *testing.T) {
+// TC-209 host error is a routine result value.
+func TestTC209_RoutineHostErrorIsResultValue(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	pub := &publisher{}
+	pub := &publisher{boom: make(chan struct{})}
 	got := make(chan error, 1)
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	sess, err := eng.NewSession(wflang.SessionOptions{
@@ -90,68 +265,14 @@ func TestTC209_RoutineErrorHandler(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	select {
-	case e := <-got:
-		if e == nil || e.Error() == "" {
-			t.Fatalf("want non-nil error, got %v", e)
-		}
+	case <-pub.boom:
 	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("RoutineErrorHandler was not called")
-	}
-}
-
-// TC-210 routine yield 进入 RoutineYieldHandler
-func TestTC210_RoutineYieldHandler(t *testing.T) {
-	reg := wflang.DefaultRegistry()
-	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	pub := &publisher{}
-	got := make(chan wflang.YieldState, 1)
-	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
-	sess, err := eng.NewSession(wflang.SessionOptions{
-		Vars: map[string]any{"p": pub},
-		RoutineYieldHandler: func(ctx context.Context, y wflang.YieldState) {
-			got <- y
-		},
-	})
-	if err != nil {
-		t.Fatalf("session: %v", err)
-	}
-	src := []byte(`[
-		{"routine":{"Yieldy":[{"var":"p"},{"literal":{"type":"string","value":"x"}}]}},
-		{"return":{"literal":{"type":"int64","value":"1"}}}
-	]`)
-	if _, err := sess.AppendRun(context.Background(), src); err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("routine did not run")
 	}
 	select {
-	case y := <-got:
-		if y.Token != "tok-1" {
-			t.Fatalf("want token tok-1, got %q", y.Token)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("RoutineYieldHandler was not called")
-	}
-}
-
-// TC-093 前台 yield error 按普通 error 处理（不进 yield handler）
-func TestTC093_ForegroundYieldIsOrdinaryError(t *testing.T) {
-	reg := wflang.DefaultRegistry()
-	if err := reg.AutoBindType((*publisher)(nil)); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	pub := &publisher{}
-	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
-	src := []byte(`[{"return":{"Yieldy":[{"var":"p"},{"literal":{"type":"string","value":"x"}}]}}]`)
-	prog, err := eng.CompileJSON(src)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
-	_, err = prog.Run(context.Background(), wflang.RunOptions{
-		Vars: map[string]any{"p": pub},
-	})
-	if err == nil {
-		t.Fatalf("want ordinary error bubble, got nil")
+	case e := <-got:
+		t.Fatalf("handler got ordinary host error result: %v", e)
+	default:
 	}
 }
 

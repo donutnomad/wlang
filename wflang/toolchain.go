@@ -111,24 +111,37 @@ func dumpNode(n ast.Node) (any, error) {
 			}
 			args = append(args, d)
 		}
+		if x.Op == "await" {
+			if len(args) == 1 {
+				return map[string]any{"await": args[0]}, nil
+			}
+			return map[string]any{"await": args}, nil
+		}
 		return map[string]any{x.Op: args}, nil
 	case *ast.Let:
-		body := map[string]any{"name": x.Name}
-		if x.Type != "" {
-			body["type"] = x.Type
+		body := map[string]any{}
+		bindings := x.Bindings
+		if len(bindings) == 0 {
+			bindings = []ast.LetBinding{{Name: x.Name, Type: x.Type, Expr: x.Expr}}
 		}
-		ed, err := dumpNode(x.Expr)
-		if err != nil {
-			return nil, err
+		for _, b := range bindings {
+			ed, err := dumpNode(b.Expr)
+			if err != nil {
+				return nil, err
+			}
+			if b.Type != "" {
+				body[b.Name] = map[string]any{"type": b.Type, "value": ed}
+			} else {
+				body[b.Name] = ed
+			}
 		}
-		body["expr"] = ed
 		return map[string]any{"let": body}, nil
 	case *ast.Set:
 		ed, err := dumpNode(x.Expr)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"set": map[string]any{"name": x.Name, "expr": ed}}, nil
+		return map[string]any{"set": map[string]any{x.Name: ed}}, nil
 	case *ast.Return:
 		ed, err := dumpNode(x.Expr)
 		if err != nil {
@@ -188,23 +201,18 @@ func dumpNode(n ast.Node) (any, error) {
 		}
 		return map[string]any{"expr": ed}, nil
 	case *ast.Routine:
-		c, err := dumpNode(x.Call)
+		if x.Call != nil {
+			c, err := dumpNode(x.Call)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"routine": c}, nil
+		}
+		body, err := dumpNodeList(x.Body)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"routine": c}, nil
-	case *ast.Try:
-		do, err := dumpNodeList(x.Do)
-		if err != nil {
-			return nil, err
-		}
-		catch, err := dumpNodeList(x.Catch)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{
-			"try": map[string]any{"do": do, "bind": x.Bind, "catch": catch},
-		}, nil
+		return map[string]any{"routine": map[string]any{"do": body}}, nil
 	}
 	return nil, werr.Newf(werr.CodeASTShape, "DumpAST: unsupported node %T", n)
 }
@@ -380,17 +388,6 @@ func walkPath(n ast.Node, target string) (ast.Node, bool) {
 				return r, true
 			}
 		}
-	case *ast.Try:
-		for _, s := range x.Do {
-			if r, ok := walkPath(s, target); ok {
-				return r, true
-			}
-		}
-		for _, s := range x.Catch {
-			if r, ok := walkPath(s, target); ok {
-				return r, true
-			}
-		}
 	}
 	return nil, false
 }
@@ -404,7 +401,6 @@ type ExplainReport struct {
 	Operators    []string `json:"operators"`
 	Capabilities []string `json:"capabilities"`
 	HasRoutines  bool     `json:"hasRoutines"`
-	HasTry       bool     `json:"hasTry"`
 }
 
 // Explain inspects a compiled program and returns an ExplainReport.
@@ -442,8 +438,6 @@ func (p *Program) Explain() ExplainReport {
 			}
 		case *ast.Routine:
 			r.HasRoutines = true
-		case *ast.Try:
-			r.HasTry = true
 		}
 		walkChildren(n, walk)
 	}
@@ -513,13 +507,6 @@ func walkChildren(n ast.Node, fn func(ast.Node)) {
 		for _, s := range x.Do {
 			fn(s)
 		}
-	case *ast.Try:
-		for _, s := range x.Do {
-			fn(s)
-		}
-		for _, s := range x.Catch {
-			fn(s)
-		}
 	case *ast.Match:
 		fn(x.Value)
 		for _, c := range x.Cases {
@@ -566,7 +553,6 @@ type CallPlan struct {
 	ErrorIndex   int      `json:"errorIndex"` // -1 when the function has no error
 	ResultKind   string   `json:"resultKind"` // "value" | "tuple" | "null"
 	Capabilities []string `json:"capabilities,omitempty"`
-	YieldAware   bool     `json:"yieldAware"`
 	Deprecated   string   `json:"deprecated,omitempty"`
 }
 
@@ -633,7 +619,6 @@ func planFromMeta(c *ast.Call, m *FuncMeta) *CallPlan {
 		ParamTypes:   m.ParamTypes,
 		ReturnTypes:  m.ReturnTypes,
 		Capabilities: m.Capabilities,
-		YieldAware:   m.YieldAware,
 		Deprecated:   m.Deprecated,
 	}
 	plan.GoFunc = m.GoFunc
@@ -666,8 +651,9 @@ type SchemaIssue struct {
 var reservedOperators = map[string]bool{
 	"literal": true, "array": true, "var": true, "pkg": true,
 	"if": true, "let": true, "set": true, "return": true,
-	"routine": true, "try": true, "panic": true, "expr": true,
+	"routine": true, "await": true, "panic": true, "expr": true,
 	"foreach": true, "fori": true, "break": true, "continue": true,
+	"defer": true, "map": true, "struct": true, "chan": true, "select": true,
 }
 
 // ValidateSchema enforces structural rules without the full compile pipeline:
@@ -741,7 +727,7 @@ func walkSchema(path string, v any, issues *[]SchemaIssue, inStmt bool) {
 			}
 			return
 		}
-		// Composite operators (let/set/foreach/fori/try/if/array/routine)
+		// Composite operators (let/set/foreach/fori/try/if/array/routine/await)
 		// have a body whose shape is dictated by the operator itself, not
 		// the single-key rule. We recurse into the inner expression
 		// children but don't enforce single-key on the immediate body.
@@ -770,7 +756,8 @@ func walkSchema(path string, v any, issues *[]SchemaIssue, inStmt bool) {
 // shape (not the standard single-key operator-call shape).
 func isCompositeBody(op string) bool {
 	switch op {
-	case "let", "set", "foreach", "fori", "try", "if", "array", "routine":
+	case "let", "set", "foreach", "fori", "if", "array", "routine", "await",
+		"defer", "map", "struct", "chan", "select":
 		return true
 	}
 	return false
@@ -1206,6 +1193,12 @@ func (t *tracingRegistry) Invoke(ctx context.Context, op string, recv types.Valu
 	}
 	t.events = append(t.events, ev)
 	return v, err
+}
+
+// StructType forwards to the wrapped registry so struct-literal evaluation
+// keeps working under tracing.
+func (t *tracingRegistry) StructType(name string) (reflect.Type, bool) {
+	return t.inner.StructType(name)
 }
 
 // ---------- Migrator (LANGUAGE.md §13.2 / TC-883) ----------

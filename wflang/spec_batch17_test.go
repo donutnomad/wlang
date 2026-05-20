@@ -184,7 +184,7 @@ func TestTC673_ResultKindSingleAndNull(t *testing.T) {
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 
-	// Single-value result: typed int64.
+	// (T,error) result: tuple<T,error>.
 	p1, err := eng.CompileJSON([]byte(`[{"return":{"Single":[{"var":"s"}]}}]`))
 	if err != nil {
 		t.Fatalf("compile1: %v", err)
@@ -195,11 +195,11 @@ func TestTC673_ResultKindSingleAndNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run1: %v", err)
 	}
-	if v1.TypeName() != "int64" || v1.Go().(int64) != 5 {
-		t.Fatalf("single: want int64=5, got %s=%v", v1.TypeName(), v1.Go())
+	if v1.TypeName() != "tuple<int64,error>" || unwrap1(t, v1).(int64) != 5 || unwrapErr(t, v1) != nil {
+		t.Fatalf("single: want tuple<int64,error>{5,nil}, got %s=%v", v1.TypeName(), v1.Go())
 	}
 
-	// error-only with nil error: null.
+	// error-only with nil error: nil error typed value.
 	p2, err := eng.CompileJSON([]byte(`[{"return":{"Nothing":[{"var":"s"}]}}]`))
 	if err != nil {
 		t.Fatalf("compile2: %v", err)
@@ -210,7 +210,7 @@ func TestTC673_ResultKindSingleAndNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run2: %v", err)
 	}
-	if v2.TypeName() != "null" {
-		t.Fatalf("null: want null, got %s", v2.TypeName())
+	if v2.TypeName() != "error" || v2.Go() != nil {
+		t.Fatalf("nil error: want error nil, got %s=%v", v2.TypeName(), v2.Go())
 	}
 }

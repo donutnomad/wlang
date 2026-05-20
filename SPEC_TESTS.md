@@ -4,7 +4,7 @@
 
 - **Spec**：对应 `LANGUAGE.md` 章节
 - **Given**：前置条件 / 注册 / 输入
-- **When**：执行动作（Compile / Run / AppendRun / ResumeYield 等）
+- **When**：执行动作（Compile / Run / AppendRun / await 等）
 - **Then**：期望结果（typed value、错误码、状态、副作用）
 
 错误码以 `LANGUAGE.md §9.3` 为准。所有常量必须用 typed literal。
@@ -303,11 +303,11 @@
 - When: `{"Error":[{"var":"err"}]}`
 - Then: string=err.Error()
 
-### TC-093 前台调用 yield error 按普通 error 处理
+### TC-093 前台调用 host error 按普通 error 处理
 - Spec: §2.5 / §5.3
-- Given: 前台（非 routine）宿主调用返回 yield error
+- Given: 前台宿主调用返回 Go error
 - When: 执行
-- Then: 走默认错误短路，不进入 yielded 状态
+- Then: 走默认错误短路
 
 ---
 
@@ -465,11 +465,11 @@
 - When: AppendRun
 - Then: 注册集 = {A,B}；冲突项报错
 
-### TC-160 routine yielded 状态可恢复
+### TC-160 routine handle 可 await
 - Spec: §3.1
-- Given: 片段触发 routine yield
-- When: ResumeYield
-- Then: routine 从挂起点继续；session 状态从 yielded 转回 running
+- Given: 片段启动 routine 并保存 handle
+- When: await handle
+- Then: 返回 routine 的 typed value
 
 ---
 
@@ -623,11 +623,11 @@
 - When: routine 内宿主调用返回 error
 - Then: handler 收到该 error；不冒泡到主流程
 
-### TC-210 routine yield 进入 RoutineYieldHandler
+### TC-210 routine await 获取返回值
 - Spec: §3.3
-- Given: routine 内调用返回 YieldError
+- Given: routine 内调用成功返回
 - When: 执行
-- Then: handler 收到 token；session 进入 routine yielded 状态
+- Then: await handle 得到返回值
 
 ### TC-211 routine 受 capability 与 MaxRoutines 限制
 - Spec: §3.3 / §10.1
@@ -877,41 +877,41 @@
 - When: CompileJSON
 - Then: `E_AST_SHAPE` / `E_TYPE`
 
-### TC-402 NewSession + AppendRun + ResumeYield 完整链路
+### TC-402 NewSession + AppendRun + await 完整链路
 - Spec: §5.2
-- Given: 注册带 yield 的方法
-- When: AppendRun（routine 触发 yield）→ ResumeYield 注入结果
-- Then: routine 继续执行；session 状态正确流转
+- Given: 注册返回业务值的方法
+- When: AppendRun 启动 routine 并 await handle
+- Then: session 返回 routine 结果
 
-### TC-403 ResumeYield Token 一次性
+### TC-403 routine handle 可重复 await
 - Spec: §5.2 / §8.1
-- Given: 已成功 ResumeYield 一次的 token
-- When: 再次 ResumeYield 同 token
-- Then: `E_YIELD_TOKEN_MISMATCH`
+- Given: 已成功 await 一次的 handle
+- When: 再次 await 同 handle
+- Then: 返回缓存结果
 
-### TC-404 ResumeYield Results 类型不匹配
+### TC-404 await 非 handle 报错
 - Spec: §5.2
-- Given: 挂起调用 ReturnTypes=[string]，注入 int64
-- When: ResumeYield
+- Given: await 参数不是 routineHandle
+- When: await
 - Then: `E_TYPE`
 
-### TC-405 ResumeYield 多业务返回值 → tuple
+### TC-405 await 多业务返回值 → tuple
 - Spec: §5.2
-- Given: ReturnTypes=[A,B]
-- When: ResumeYield Results=[a,b]
-- Then: 注入为 tuple<A,B>
+- Given: routine 返回 [A,B]
+- When: await handle
+- Then: 返回 tuple<A,B>
 
-### TC-406 ResumeYield 仅 error 返回的成功路径
+### TC-406 await 仅 error 返回的成功路径
 - Spec: §5.2
-- Given: ReturnTypes=[]，无业务值
-- When: ResumeYield 不带 Err
-- Then: 注入 null typed value
+- Given: routine 函数仅返回 error 且 error=nil
+- When: await handle
+- Then: 返回 null typed value
 
-### TC-407 ResumeInput.Err 注入错误
+### TC-407 await routine error
 - Spec: §5.2
-- Given: ResumeInput.Err = some error
-- When: ResumeYield
-- Then: routine 内对应调用按普通 Go error 处理
+- Given: routine 函数返回 Go error
+- When: await handle
+- Then: await 按普通错误路径返回
 
 ---
 
@@ -1051,7 +1051,7 @@
 
 ### TC-483 Conformance 覆盖矩阵
 - Spec: §5.8
-- Given: package call、method call、typed literal、tuple、routine yield resume、auto host type
+- Given: package call、method call、typed literal、tuple、routine handle、await、auto host type
 - When: 跑 conformance suite
 - Then: 全部通过
 
@@ -1295,7 +1295,7 @@
 - Spec: §7.7
 - Given: 任一调用
 - When: 编译
-- Then: CallPlan 含 Operator/ReceiverKind/PackageName/GoFunc 或 GoMethod/ParamTypes/ReturnTypes/ErrorIndex/ResultKind/Capabilities/YieldAware
+- Then: CallPlan 含 Operator/ReceiverKind/PackageName/GoFunc 或 GoMethod/ParamTypes/ReturnTypes/ErrorIndex/ResultKind/Capabilities
 
 ### TC-673 ResultKind：单值 / tuple / null
 - Spec: §7.7 运行规则
@@ -1303,11 +1303,11 @@
 - When: Run
 - Then: 分别得到 typed value / tuple / null
 
-### TC-674 routine yield_aware 标记
+### TC-674 routine 调用进入 CallPlan
 - Spec: §7.7
-- Given: 可能 yield 的方法注册时 YieldAware=true
+- Given: routine 包装一个宿主调用
 - When: 编译 routine 调用
-- Then: CallPlan.YieldAware=true
+- Then: CallPlan 含该宿主调用及返回类型
 
 ### TC-675 常量折叠
 - Spec: §7.8
@@ -1329,60 +1329,60 @@
 
 ---
 
-## §8 Yield 挂起与恢复
+## §8 routine handle 与 await
 
-### TC-700 YieldError 接口
+### TC-700 routineHandle 接口
 - Spec: §8.1
-- Given: 实现 YieldError 的宿主 error
-- When: 反射
-- Then: 含 Error()/Token()/Payload()
+- Given: routine 表达式
+- When: 执行
+- Then: 返回类型为 routineHandle
 
-### TC-701 token 唯一性
+### TC-701 await 多 handle 保持输入顺序
 - Spec: §8.1
-- Given: 同 session 多个 yield
-- When: 检查 tokens
-- Then: 互不重复
+- Given: 多个 routine handle
+- When: await [h2,h1]
+- Then: 返回 array<any> 顺序为 [h2结果,h1结果]
 
-### TC-702 token 可使用外部任务 ID
+### TC-702 handle 可跨语句保存
 - Spec: §8.1
-- Given: token = 任务 ID
-- When: ResumeYield(taskID)
-- Then: 命中挂起点
+- Given: let 绑定 routine handle
+- When: 后续语句 await
+- Then: 命中同一个 handle
 
-### TC-703 token mismatch
+### TC-703 await 未知变量
 - Spec: §8.1
-- Given: 任意 token
-- When: ResumeYield 错误 token
-- Then: `E_YIELD_TOKEN_MISMATCH`
+- Given: await 未定义变量
+- When: 执行
+- Then: `E_SYMBOL`
 
-### TC-704 挂起点保存内容完整
+### TC-704 handle 缓存结果
 - Spec: §8.2
-- Given: routine 挂起
-- When: 检查 YieldState
-- Then: 含 Token/Payload/Path/CallPlanID/ReturnTypes（及内部作用域 / 程序计数器）
+- Given: routine 已完成
+- When: 多次 await 同一 handle
+- Then: 返回同一结果
 
-### TC-705 ResumeYield 单业务返回值
+### TC-705 await 单业务返回值
 - Spec: §8.3
-- Given: ReturnTypes=[T]
-- When: Results=[t]
-- Then: 注入单 typed value，routine 继续
+- Given: routine 返回 T
+- When: await
+- Then: 返回单 typed value
 
-### TC-706 ResumeYield 多业务返回值 → tuple
+### TC-706 await 多业务返回值 → tuple
 - Spec: §8.3
-- Given: ReturnTypes=[A,B]
-- When: Results=[a,b]
+- Given: routine 返回 A,B
+- When: await
 - Then: 注入 tuple<A,B>
 
-### TC-707 ResumeYield Err 注入
+### TC-707 await routine Err
 - Spec: §8.3
-- Given: ResumeInput.Err 非空
-- When: ResumeYield
-- Then: routine 内对应调用按错误处理
+- Given: routine 返回 error
+- When: await
+- Then: await 返回错误
 
-### TC-708 自动宿主类型注入
+### TC-708 自动宿主类型返回
 - Spec: §8.3
-- Given: 注入未注册 Go 类型
-- When: ResumeYield
+- Given: routine 返回未注册 Go 类型
+- When: await
 - Then: 按 §4.2.2 自动生成类型名
 
 ---
@@ -1996,4 +1996,3 @@
 - Given: 任一上层 DSL → wflang AST 编译器
 - When: 编译
 - Then: 输出合法 wflang JSON 并通过 round-trip
-

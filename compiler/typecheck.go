@@ -155,11 +155,6 @@ func (t *typeChecker) walk(n ast.Node) error {
 			}
 		}
 		return t.walkBlock(x.Do)
-	case *ast.Try:
-		if err := t.walkBlock(x.Do); err != nil {
-			return err
-		}
-		return t.walkBlock(x.Catch)
 	case *ast.Match:
 		if err := t.walk(x.Value); err != nil {
 			return err
@@ -174,7 +169,10 @@ func (t *typeChecker) walk(n ast.Node) error {
 		}
 		return t.walkBlock(x.Default)
 	case *ast.Routine:
-		return t.walk(x.Call)
+		if x.Call != nil {
+			return t.walk(x.Call)
+		}
+		return t.walkBlock(x.Body)
 	case *ast.Array:
 		for _, it := range x.Items {
 			if err := t.walk(it); err != nil {

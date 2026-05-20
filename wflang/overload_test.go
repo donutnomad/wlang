@@ -49,9 +49,10 @@ func TestTC087_OverloadInt64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	// Should match AddInt64 (return int64=2)
-	if v.Go().(int64) != 2 {
-		t.Fatalf("want int64=2, got %s=%v", v.TypeName(), v.Go())
+	// Should match AddInt64 (return tuple<int64,error> with value=2)
+	parts, ok := v.Go().([]any)
+	if !ok || len(parts) != 2 || parts[0].(int64) != 2 || parts[1] != nil {
+		t.Fatalf("want tuple<int64,error>{2,nil}, got %s=%v", v.TypeName(), v.Go())
 	}
 }
 
@@ -72,9 +73,10 @@ func TestTC088_OverloadInt8Exact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	// AddInt8 returns int64=2
-	if v.Go().(int64) != 2 {
-		t.Fatalf("want 2, got %v", v.Go())
+	// AddInt8 returns tuple<int64,error>{2,nil}
+	parts, ok := v.Go().([]any)
+	if !ok || len(parts) != 2 || parts[0].(int64) != 2 || parts[1] != nil {
+		t.Fatalf("want tuple<int64,error>{2,nil}, got %v", v.Go())
 	}
 }
 

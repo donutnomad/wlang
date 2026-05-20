@@ -50,8 +50,8 @@ var errExposed = errors.New("boom-1")
 
 func (errProducer) Fail() error { return errExposed }
 
-// try-catch captures the error; then Error method on the bound err returns
-// the original message.
+// A host function that returns only error yields an error typed value. The
+// Error method on that value returns the original message.
 func TestTC092_ErrorMethodExposed(t *testing.T) {
 	reg := wflang.DefaultRegistry()
 	if err := reg.AutoBindType(errProducer{}); err != nil {
@@ -59,11 +59,8 @@ func TestTC092_ErrorMethodExposed(t *testing.T) {
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	src := []byte(`[
-		{"try":{"do":[
-			{"expr":{"Fail":[{"var":"p"}]}}
-		],"bind":"err","catch":[
-			{"return":{"Error":[{"var":"err"}]}}
-		]}}
+		{"let":{"err":{"Fail":[{"var":"p"}]}}},
+		{"return":{"Error":[{"var":"err"}]}}
 	]`)
 	prog, err := eng.CompileJSON(src)
 	if err != nil {

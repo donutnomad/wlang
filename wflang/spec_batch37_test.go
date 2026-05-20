@@ -94,7 +94,7 @@ func TestTC648_ConstructorCoercionInOverload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	got, ok := v.Go().(*big.Rat)
+	got, ok := unwrap1(t, v).(*big.Rat)
 	if !ok || got == nil {
 		t.Fatalf("got %T (%v), want *big.Rat", v.Go(), v.Go())
 	}

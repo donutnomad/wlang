@@ -48,7 +48,7 @@ func TestTC038_PkgLen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(int64) != 5 {
+	if unwrap1(t, v).(int64) != 5 {
 		t.Fatalf("want 5, got %v", v.Go())
 	}
 }
@@ -124,7 +124,7 @@ func TestTC086_AutoBindType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if v.Go().(string) != "Alice runs" {
+	if unwrap1(t, v).(string) != "Alice runs" {
 		t.Fatalf("want %q, got %v", "Alice runs", v.Go())
 	}
 }
@@ -254,7 +254,7 @@ func TestTC080_FindByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	bk, ok := v.Go().(*Book)
+	bk, ok := unwrap1(t, v).(*Book)
 	if !ok {
 		t.Fatalf("want *Book, got %T", v.Go())
 	}

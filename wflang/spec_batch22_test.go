@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,37 +97,30 @@ func TestTC991_RoutineReturnsNullAndRunsInBackground(t *testing.T) {
 	}
 }
 
-// --- TC-725 routine error 不冒泡到主流程 ---------------------------
-// When a routine's host call returns an error, the main program still
-// returns normally; the error is delivered to RoutineErrorHandler.
-type tc725Fail struct{}
+// --- TC-725 routine host error 不冒泡到主流程 ---------------------------
+// When a routine's host call returns an error value, the main program still
+// returns normally and the host call completes in the background.
+type tc725Fail struct{ hits *atomic.Int32 }
 
-func (tc725Fail) Boom() error { return errors.New("boom-boom") }
+func (f tc725Fail) Boom() error {
+	f.hits.Add(1)
+	return errors.New("boom-boom")
+}
 
 func TestTC725_RoutineErrorStaysOffMain(t *testing.T) {
+	var hits atomic.Int32
 	reg := wflang.DefaultRegistry()
 	if err := reg.BindGoPackage("kapow", registry.PackageSpec{
 		Functions: []registry.FuncSpec{
-			{GoName: "Boom", Impl: tc725Fail{}.Boom, Pure: false},
+			{GoName: "Boom", Impl: tc725Fail{hits: &hits}.Boom, Pure: false},
 		},
 	}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
-	var mu sync.Mutex
-	var seen error
-	done := make(chan struct{}, 1)
-	handler := func(_ context.Context, err error) {
-		mu.Lock()
-		seen = err
-		mu.Unlock()
-		select {
-		case done <- struct{}{}:
-		default:
-		}
-	}
+	gotErr := make(chan error, 1)
 	sess, err := eng.NewSession(wflang.SessionOptions{
-		RoutineErrorHandler: handler,
+		RoutineErrorHandler: func(_ context.Context, err error) { gotErr <- err },
 	})
 	if err != nil {
 		t.Fatalf("session: %v", err)
@@ -141,17 +135,13 @@ func TestTC725_RoutineErrorStaysOffMain(t *testing.T) {
 	if v.Go().(int64) != 7 {
 		t.Fatalf("main result: want 7, got %v", v.Go())
 	}
-	// Wait briefly for the async handler.
+	waitUntil(t, 2*time.Second, func() bool {
+		return hits.Load() == 1
+	})
 	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("RoutineErrorHandler was not invoked in time")
-	}
-	mu.Lock()
-	got := seen
-	mu.Unlock()
-	if got == nil || !containsString(got.Error(), "boom-boom") {
-		t.Fatalf("handler got %v, want 'boom-boom'", got)
+	case e := <-gotErr:
+		t.Fatalf("handler got ordinary host error result: %v", e)
+	default:
 	}
 }
 
