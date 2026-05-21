@@ -176,6 +176,11 @@ func parseErr(typ, raw string, cause error) *werr.LangError {
 	return e
 }
 
+// FuncType returns the language type name for a function value.
+func FuncType(params, returns []string) string {
+	return "func<(" + strings.Join(params, ",") + ")->" + strings.Join(returns, ",") + ">"
+}
+
 // ArrayType returns the language type name array<T>.
 func ArrayType(elem string) string { return "array<" + elem + ">" }
 
@@ -183,15 +188,64 @@ func ArrayType(elem string) string { return "array<" + elem + ">" }
 // the declared element type (TC-014, TC-904).
 func NewArray(elem string, elems []Value) (Value, error) {
 	for i, e := range elems {
-		if e.TypeName() != elem {
+		if elem != TAny && e.TypeName() != elem {
 			return Value{}, werr.Newf(werr.CodeType,
 				"array<%s> element %d has type %s", elem, i, e.TypeName())
+		}
+		if !arrayElemCarrierOK(elem, e.val) {
+			return Value{}, werr.Newf(werr.CodeType,
+				"array<%s> element %d has invalid Go carrier %T", elem, i, e.val)
 		}
 	}
 	// Build a typed []T slice for well-known element types so Go consumers
 	// get the same carrier they would get from the underlying Go type.
 	goSlice := buildTypedSlice(elem, elems)
 	return Value{typ: ArrayType(elem), val: goSlice}, nil
+}
+
+func arrayElemCarrierOK(elem string, val any) bool {
+	switch elem {
+	case TAny:
+		return true
+	case TInt8:
+		_, ok := val.(int8)
+		return ok
+	case TInt16:
+		_, ok := val.(int16)
+		return ok
+	case TInt32:
+		_, ok := val.(int32)
+		return ok
+	case TInt64:
+		_, ok := val.(int64)
+		return ok
+	case TUint8:
+		_, ok := val.(uint8)
+		return ok
+	case TUint16:
+		_, ok := val.(uint16)
+		return ok
+	case TUint32:
+		_, ok := val.(uint32)
+		return ok
+	case TUint64:
+		_, ok := val.(uint64)
+		return ok
+	case TFloat32:
+		_, ok := val.(float32)
+		return ok
+	case TFloat64:
+		_, ok := val.(float64)
+		return ok
+	case TBoolean:
+		_, ok := val.(bool)
+		return ok
+	case TString:
+		_, ok := val.(string)
+		return ok
+	default:
+		return true
+	}
 }
 
 func buildTypedSlice(elem string, elems []Value) any {

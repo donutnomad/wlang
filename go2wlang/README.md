@@ -162,17 +162,22 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 - `var x = expr`
 - `x := expr`
 - `x = expr`
+- `var x T`
 - `a, b := call()` 和 `a, b = call()` 作为元组解构
 - `return expr`
+- `return`
+- 命名返回值函数，例如 `func Rule(...) (err error)`
 - `if cond { ... } else { ... }`
 - `for i := from; i < to; i++ { ... }`
 - `for i := from; i < to; i += step { ... }`
+- `for i := len(xs)-1; i >= 0; i-- { ... }`
 - `for i, item := range xs { ... }`
 - `for _, item := range xs { ... }`
 - `break`
 - `continue`
 - `panic(expr)`
 - `defer pkg.Call(args...)` 和 `defer receiver.Call(args...)`
+- `defer func(){ ... }()`
 - `go pkg.Call(args...)`
 - `go func(){ ... }()`
 - `ch <- value`
@@ -185,7 +190,11 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 - 一元 `!`
 - 二元 `+`、`-`、`*`、`/`、比较运算、`&&`、`||`
 - 包调用，例如 `demo.Score(user, total)`
+- 当前包调用，例如 `BuildFailureReason(step, err)`
 - 接收者调用，例如 `svc.Run(input)`
+- 函数字面量作为值
+- 函数值调用，例如 `compensations[i](ctx, reason)`
+- 索引表达式 `xs[i]`
 - 切片、数组、map 和结构体复合字面量
 - 当前包结构体字面量，例如 `Args{Name: "aaa"}`
 - `make(chan T)` 和 `make(chan T, n)`
@@ -196,6 +205,8 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 - `close(ch)` 生成 `ch.close(ch)`
 - `panic(v)` 生成 wlang `panic` 语句
 - `make(chan T, n)` 生成 wlang channel 字面量
+- `len(xs)` 生成 `arr.len(xs)`
+- `xs = append(xs, v)` 生成 `arr.push(xs, v)`
 
 ## 映射规则
 
@@ -223,13 +234,28 @@ risk, err := demo.Score(user, total)
 {"let":[["risk","err"],{"Score":[{"pkg":"demo"},{"var":"user"},{"var":"total"}]}]}
 ```
 
+Go 闭包和补偿栈会生成 wlang 函数值与 array 原生操作：
+
+```go
+compensations = append(compensations, func(ctx workflow.Context, reason FailureReason) error {
+	return workflow.MarkReserveFailed(ctx, reason)
+})
+compErr := compensations[i](ctx, reason)
+```
+
+```json
+[
+  {"expr":{"arr.push":[{"var":"compensations"},{"fn":{"params":[["ctx","workflow.Context"],["reason","FailureReason"]],"returns":["error"],"do":[...]}}]}},
+  {"let":{"compErr":{"call":{"fn":{"arr.get":[{"var":"compensations"},{"var":"i"}]},"args":[{"var":"ctx"},{"var":"reason"}]}}}}
+]
+```
+
 ## Go 暂缺能力
 
 遇到当前范围外的语法时，翻译器会返回带有源码位置和节点类型的 `DiagnosticError`。
 
 v1 当前范围外：
 
-- 函数值作为普通值
 - 嵌套函数声明
 - 接口分派、类型断言和类型 switch
 - 反射、`unsafe` 和 cgo
@@ -238,7 +264,7 @@ v1 当前范围外：
 - map/slice 索引赋值
 - `switch` fallthrough 和带标签控制流
 - `goto`
-- 命名返回值变更和 `recover`
+- `recover`
 - 含多个 init/post 语句的复杂 `for` 语句
 - 包级变量、`init` 和 `iota`
 - 接收/发送左侧较复杂的 select case

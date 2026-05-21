@@ -49,6 +49,8 @@ var builtinKeywords = map[string]bool{
 	"routine":  true,
 	"await":    true,
 	"array":    true,
+	"fn":       true,
+	"call":     true,
 	"defer":    true,
 	"map":      true,
 	"struct":   true,
@@ -226,6 +228,10 @@ func parseNodeWithKey(key string, body any, path string) (ast.Node, error) {
 		return parseAwait(body, nodePath)
 	case "array":
 		return parseArrayLit(body, nodePath)
+	case "fn":
+		return parseFuncLit(body, nodePath)
+	case "call":
+		return parseFuncCall(body, nodePath)
 	case "defer":
 		return parseDefer(body, nodePath)
 	case "map":
@@ -613,11 +619,109 @@ func parseSet(body any, path string) (ast.Node, error) {
 }
 
 func parseReturn(body any, path string) (ast.Node, error) {
+	if m, ok := body.(map[string]any); ok && len(m) == 1 {
+		if raw, ok := m["named"]; ok {
+			name, ok := raw.(string)
+			if !ok || name == "" {
+				return nil, werr.Newf(werr.CodeASTShape,
+					"return.named must be a non-empty string").WithPath(path)
+			}
+			return &ast.Return{Base: ast.Base{P: path}, Named: name}, nil
+		}
+	}
 	expr, err := parseExpr(body, path)
 	if err != nil {
 		return nil, err
 	}
 	return &ast.Return{Base: ast.Base{P: path}, Expr: expr}, nil
+}
+
+func parseFuncLit(body any, path string) (ast.Node, error) {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"fn body must be object").WithPath(path)
+	}
+	out := &ast.FuncLit{Base: ast.Base{P: path}}
+	if rawParams, ok := m["params"]; ok {
+		arr, ok := rawParams.([]any)
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"fn.params must be an array").WithPath(path + "/params")
+		}
+		for i, raw := range arr {
+			paramPath := fmt.Sprintf("%s/params/%d", path, i)
+			pair, ok := raw.([]any)
+			if !ok || len(pair) != 2 {
+				return nil, werr.Newf(werr.CodeASTShape,
+					"fn.params[%d] must be [name,type]", i).WithPath(paramPath)
+			}
+			name, _ := pair[0].(string)
+			typ, _ := pair[1].(string)
+			if name == "" || typ == "" {
+				return nil, werr.Newf(werr.CodeASTShape,
+					"fn.params[%d] requires non-empty name and type", i).WithPath(paramPath)
+			}
+			out.Params = append(out.Params, ast.FuncParam{Name: name, Type: typ})
+		}
+	}
+	if rawReturns, ok := m["returns"]; ok {
+		arr, ok := rawReturns.([]any)
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"fn.returns must be an array").WithPath(path + "/returns")
+		}
+		for i, raw := range arr {
+			typ, _ := raw.(string)
+			if typ == "" {
+				return nil, werr.Newf(werr.CodeASTShape,
+					"fn.returns[%d] must be a non-empty string", i).
+					WithPath(fmt.Sprintf("%s/returns/%d", path, i))
+			}
+			out.Returns = append(out.Returns, typ)
+		}
+	}
+	bodyNodes, err := parseStatements(toArr(m["do"]), path+"/do")
+	if err != nil {
+		return nil, err
+	}
+	out.Body = bodyNodes
+	return out, nil
+}
+
+func parseFuncCall(body any, path string) (ast.Node, error) {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"call body must be object").WithPath(path)
+	}
+	rawFn, ok := m["fn"]
+	if !ok {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"call.fn is required").WithPath(path)
+	}
+	fn, err := parseExpr(rawFn, path+"/fn")
+	if err != nil {
+		return nil, err
+	}
+	rawArgs := []any{}
+	if raw, ok := m["args"]; ok {
+		arr, ok := raw.([]any)
+		if !ok {
+			return nil, werr.Newf(werr.CodeASTShape,
+				"call.args must be an array").WithPath(path + "/args")
+		}
+		rawArgs = arr
+	}
+	args := make([]ast.Node, 0, len(rawArgs))
+	for i, raw := range rawArgs {
+		arg, err := parseExpr(raw, fmt.Sprintf("%s/args/%d", path, i))
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+	}
+	return &ast.FuncCall{Base: ast.Base{P: path}, Fn: fn, Args: args}, nil
 }
 
 func parseForeach(body any, path string) (ast.Node, error) {
@@ -776,12 +880,12 @@ func parseRoutine(body any, path string) (ast.Node, error) {
 	return &ast.Routine{Base: ast.Base{P: path}, Call: call}, nil
 }
 
-// parseDefer parses {"defer": <hostCall>} (LANGUAGE.md §3.7).
+// parseDefer parses {"defer": <hostCall-or-function-call>} (LANGUAGE.md §3.7).
 func parseDefer(body any, path string) (ast.Node, error) {
 	m, ok := body.(map[string]any)
 	if !ok {
 		return nil, werr.Newf(werr.CodeASTShape,
-			"defer body must be a single host call object").WithPath(path)
+			"defer body must be a single call object").WithPath(path)
 	}
 	keys := sortedKeys(m)
 	if len(keys) != 1 {
@@ -792,12 +896,15 @@ func parseDefer(body any, path string) (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	call, ok := node.(*ast.Call)
-	if !ok {
+	switch x := node.(type) {
+	case *ast.Call:
+		return &ast.Defer{Base: ast.Base{P: path}, Call: x, Expr: x}, nil
+	case *ast.FuncCall:
+		return &ast.Defer{Base: ast.Base{P: path}, Expr: x}, nil
+	default:
 		return nil, werr.Newf(werr.CodeASTShape,
-			"defer requires a host call expression, got %T", node).WithPath(path)
+			"defer requires a call expression, got %T", node).WithPath(path)
 	}
-	return &ast.Defer{Base: ast.Base{P: path}, Call: call}, nil
 }
 
 // parseMapLit parses {"map":{"type":["K","V"],"value":{...}}} and the

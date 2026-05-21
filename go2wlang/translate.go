@@ -109,9 +109,18 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 			}
 		}
 	}
+	var prefix []any
+	if name, typ, ok := namedReturn(fn.Type.Results); ok {
+		t.namedReturn = name
+		t.locals.add(name)
+		prefix = append(prefix, map[string]any{"let": map[string]any{name: zeroLiteral(typ)}})
+	}
 	body, err := t.stmtList(fn.Body.List)
 	if err != nil {
 		return nil, err
+	}
+	if len(prefix) > 0 {
+		body = append(prefix, body...)
 	}
 	lang := opts.Lang
 	if lang == "" {
@@ -156,6 +165,7 @@ type translator struct {
 	usedImports      map[string]bool
 	locals           *localScopes
 	localPackageName string
+	namedReturn      string
 }
 
 type localScopes struct {
@@ -312,12 +322,24 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 	case *ast.AssignStmt:
 		return t.assign(x)
 	case *ast.ReturnStmt:
+		if len(x.Results) == 0 {
+			if t.namedReturn != "" {
+				return []any{map[string]any{"return": map[string]any{"named": t.namedReturn}}}, nil
+			}
+			return []any{map[string]any{"return": lit("null", nil)}}, nil
+		}
 		if len(x.Results) != 1 {
-			return nil, t.unsupported(s, "return requires exactly one value", "return a struct or tuple-producing host value")
+			return nil, t.unsupported(s, "return supports zero or one value", "return a struct or tuple-producing host value")
 		}
 		ex, err := t.expr(x.Results[0])
 		if err != nil {
 			return nil, err
+		}
+		if t.namedReturn != "" {
+			return []any{
+				map[string]any{"set": map[string]any{t.namedReturn: ex}},
+				map[string]any{"return": map[string]any{"named": t.namedReturn}},
+			}, nil
 		}
 		return []any{map[string]any{"return": ex}}, nil
 	case *ast.IfStmt:
@@ -382,7 +404,7 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 		}
 		return []any{map[string]any{"expr": ex}}, nil
 	case *ast.DeferStmt:
-		c, err := t.hostCall(x.Call)
+		c, err := t.expr(x.Call)
 		if err != nil {
 			return nil, err
 		}
@@ -427,7 +449,7 @@ func (t *translator) varDecl(decl *ast.GenDecl) ([]any, error) {
 		if !ok {
 			return nil, t.unsupported(spec, "only value specs are supported", "")
 		}
-		if len(vs.Values) != len(vs.Names) && len(vs.Values) != 1 {
+		if len(vs.Values) != 0 && len(vs.Values) != len(vs.Names) && len(vs.Values) != 1 {
 			return nil, t.unsupported(vs, "var declaration value count is unsupported", "use one value per name")
 		}
 		for i, name := range vs.Names {
@@ -458,6 +480,12 @@ func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 		name := x.Lhs[0].(*ast.Ident).Name
 		if name == "_" {
 			return nil, nil
+		}
+		if call, ok := x.Rhs[0].(*ast.CallExpr); ok && isIdentCall(call, "append") {
+			if x.Tok != token.ASSIGN {
+				return nil, t.unsupported(x, "append assignment requires =", "declare the slice before appending")
+			}
+			return t.appendStatements(name, call)
 		}
 		rhs, err := t.expr(x.Rhs[0])
 		if err != nil {
@@ -495,6 +523,25 @@ func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 		return []any{map[string]any{"let": []any{names, rhs}}}, nil
 	}
 	return nil, t.unsupported(x, "multi-value assignment requires one RHS expression", "use a host call returning a tuple")
+}
+
+func (t *translator) appendStatements(target string, call *ast.CallExpr) ([]any, error) {
+	if len(call.Args) < 2 {
+		return nil, t.unsupported(call, "append requires a slice and at least one value", "")
+	}
+	base, ok := call.Args[0].(*ast.Ident)
+	if !ok || base.Name != target {
+		return nil, t.unsupported(call.Args[0], "append target must match assignment target", "")
+	}
+	out := make([]any, 0, len(call.Args)-1)
+	for _, raw := range call.Args[1:] {
+		item, err := t.expr(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"expr": map[string]any{"arr.push": []any{varNode(target), item}}})
+	}
+	return out, nil
 }
 
 func (t *translator) elseBody(s ast.Stmt) ([]any, error) {
@@ -574,8 +621,8 @@ func (t *translator) forStmt(x *ast.ForStmt) ([]any, error) {
 		return nil, err
 	}
 	cond, ok := x.Cond.(*ast.BinaryExpr)
-	if !ok || cond.Op != token.LSS {
-		return nil, t.unsupported(x.Cond, "for condition must be i < to", "")
+	if !ok || (cond.Op != token.LSS && cond.Op != token.GEQ) {
+		return nil, t.unsupported(x.Cond, "for condition must be i < to or i >= to", "")
 	}
 	left, ok := cond.X.(*ast.Ident)
 	if !ok || left.Name != id.Name {
@@ -584,6 +631,9 @@ func (t *translator) forStmt(x *ast.ForStmt) ([]any, error) {
 	to, err := t.expr(cond.Y)
 	if err != nil {
 		return nil, err
+	}
+	if cond.Op == token.GEQ {
+		to = map[string]any{"-": []any{to, lit("int64", "1")}}
 	}
 	step, err := t.forStep(x.Post, id.Name)
 	if err != nil {
@@ -611,21 +661,35 @@ func (t *translator) forStep(post ast.Stmt, name string) (any, error) {
 	switch p := post.(type) {
 	case *ast.IncDecStmt:
 		id, ok := p.X.(*ast.Ident)
-		if !ok || id.Name != name || p.Tok != token.INC {
-			return nil, t.unsupported(post, "for post must be i++", "")
+		if !ok || id.Name != name {
+			return nil, t.unsupported(post, "for post must use loop variable", "")
 		}
-		return lit("int64", "1"), nil
+		switch p.Tok {
+		case token.INC:
+			return lit("int64", "1"), nil
+		case token.DEC:
+			return lit("int64", "-1"), nil
+		default:
+			return nil, t.unsupported(post, "for post must be i++ or i--", "")
+		}
 	case *ast.AssignStmt:
-		if len(p.Lhs) != 1 || len(p.Rhs) != 1 || p.Tok != token.ADD_ASSIGN {
-			return nil, t.unsupported(post, "for post must be i += step", "")
+		if len(p.Lhs) != 1 || len(p.Rhs) != 1 || (p.Tok != token.ADD_ASSIGN && p.Tok != token.SUB_ASSIGN) {
+			return nil, t.unsupported(post, "for post must be i += step or i -= step", "")
 		}
 		id, ok := p.Lhs[0].(*ast.Ident)
 		if !ok || id.Name != name {
 			return nil, t.unsupported(post, "for post must update loop variable", "")
 		}
-		return t.expr(p.Rhs[0])
+		step, err := t.expr(p.Rhs[0])
+		if err != nil {
+			return nil, err
+		}
+		if p.Tok == token.SUB_ASSIGN {
+			return map[string]any{"-": []any{lit("int64", "0"), step}}, nil
+		}
+		return step, nil
 	default:
-		return nil, t.unsupported(post, "for post is not supported", "")
+		return nil, t.unsupported(post, "for post must be i++/i-- or compound step", "")
 	}
 }
 
@@ -795,9 +859,17 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 	case *ast.TypeAssertExpr:
 		return nil, t.unsupported(x, "type assertions are not supported", "perform type-specific logic in a Go host function")
 	case *ast.IndexExpr:
-		return nil, t.unsupported(x, "index expressions are not supported", "use host helpers for indexing")
+		target, err := t.expr(x.X)
+		if err != nil {
+			return nil, err
+		}
+		idx, err := t.expr(x.Index)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"arr.get": []any{target, idx}}, nil
 	case *ast.FuncLit:
-		return nil, t.unsupported(x, "function literals as values are not supported", "only go func(){...}() is supported")
+		return t.funcLit(x)
 	default:
 		return nil, t.unsupported(x, "expression is not supported", "keep this code in a Go host function")
 	}
@@ -839,9 +911,121 @@ func (t *translator) callExpr(x *ast.CallExpr) (any, error) {
 				return nil, err
 			}
 			return map[string]any{"ch.close": []any{arg}}, nil
+		case "len":
+			if len(x.Args) != 1 {
+				return nil, t.unsupported(x, "len requires one argument", "")
+			}
+			arg, err := t.expr(x.Args[0])
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"arr.len": []any{arg}}, nil
+		case "append":
+			if len(x.Args) != 2 {
+				return nil, t.unsupported(x, "append expression supports exactly two arguments", "")
+			}
+			target, ok := x.Args[0].(*ast.Ident)
+			if !ok {
+				return nil, t.unsupported(x.Args[0], "append target must be an identifier", "")
+			}
+			item, err := t.expr(x.Args[1])
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"arr.push": []any{varNode(target.Name), item}}, nil
+		default:
+			if t.locals.has(id.Name) {
+				return t.dynamicCall(varNode(id.Name), x.Args)
+			}
+			return t.localPackageCall(id.Name, x.Args)
 		}
 	}
-	return t.hostCall(x)
+	if _, ok := x.Fun.(*ast.SelectorExpr); ok {
+		return t.hostCall(x)
+	}
+	fn, err := t.expr(x.Fun)
+	if err != nil {
+		return nil, err
+	}
+	return t.dynamicCall(fn, x.Args)
+}
+
+func (t *translator) dynamicCall(fn any, args []ast.Expr) (any, error) {
+	out := make([]any, 0, len(args))
+	for _, arg := range args {
+		ex, err := t.expr(arg)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ex)
+	}
+	return map[string]any{"call": map[string]any{"fn": fn, "args": out}}, nil
+}
+
+func (t *translator) localPackageCall(name string, args []ast.Expr) (any, error) {
+	callArgs := []any{map[string]any{"pkg": t.localPackageName}}
+	for _, arg := range args {
+		ex, err := t.expr(arg)
+		if err != nil {
+			return nil, err
+		}
+		callArgs = append(callArgs, ex)
+	}
+	return map[string]any{name: callArgs}, nil
+}
+
+func (t *translator) funcLit(x *ast.FuncLit) (any, error) {
+	params := []any{}
+	if x.Type.Params != nil {
+		for _, field := range x.Type.Params.List {
+			typ := typeName(field.Type)
+			if typ == "" {
+				return nil, t.unsupported(field.Type, "function parameter type is not supported", "")
+			}
+			if len(field.Names) == 0 {
+				return nil, t.unsupported(field, "function literal parameters must be named", "")
+			}
+			for _, name := range field.Names {
+				params = append(params, []any{name.Name, typ})
+			}
+		}
+	}
+	returns := []any{}
+	if x.Type.Results != nil {
+		for _, field := range x.Type.Results.List {
+			typ := typeName(field.Type)
+			if typ == "" {
+				return nil, t.unsupported(field.Type, "function result type is not supported", "")
+			}
+			count := 1
+			if len(field.Names) > 0 {
+				count = len(field.Names)
+			}
+			for i := 0; i < count; i++ {
+				returns = append(returns, typ)
+			}
+		}
+	}
+	var body []any
+	prevNamed := t.namedReturn
+	t.namedReturn = ""
+	err := t.locals.withFrame(func() error {
+		if x.Type.Params != nil {
+			for _, field := range x.Type.Params.List {
+				for _, name := range field.Names {
+					t.locals.add(name.Name)
+				}
+			}
+		}
+		var err error
+		body, err = t.stmtList(x.Body.List)
+		return err
+	})
+	t.namedReturn = prevNamed
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"fn": map[string]any{"params": params, "returns": returns, "do": body}}, nil
 }
 
 func (t *translator) makeExpr(x *ast.CallExpr) (any, error) {
@@ -1101,8 +1285,50 @@ func typeName(e ast.Expr) string {
 			return ""
 		}
 		return "array<" + elem + ">"
+	case *ast.FuncType:
+		params, returns, ok := funcTypeParts(x)
+		if !ok {
+			return ""
+		}
+		return "func<(" + strings.Join(params, ",") + ")->" + strings.Join(returns, ",") + ">"
 	}
 	return ""
+}
+
+func funcTypeParts(x *ast.FuncType) ([]string, []string, bool) {
+	params := []string{}
+	if x.Params != nil {
+		for _, field := range x.Params.List {
+			typ := typeName(field.Type)
+			if typ == "" {
+				return nil, nil, false
+			}
+			count := 1
+			if len(field.Names) > 0 {
+				count = len(field.Names)
+			}
+			for i := 0; i < count; i++ {
+				params = append(params, typ)
+			}
+		}
+	}
+	returns := []string{}
+	if x.Results != nil {
+		for _, field := range x.Results.List {
+			typ := typeName(field.Type)
+			if typ == "" {
+				return nil, nil, false
+			}
+			count := 1
+			if len(field.Names) > 0 {
+				count = len(field.Names)
+			}
+			for i := 0; i < count; i++ {
+				returns = append(returns, typ)
+			}
+		}
+	}
+	return params, returns, true
 }
 
 func goTypeToWlang(name string) string {
@@ -1120,7 +1346,11 @@ func goTypeToWlang(name string) string {
 }
 
 func zeroLiteral(e ast.Expr) any {
-	switch typeName(e) {
+	typ := typeName(e)
+	if strings.HasPrefix(typ, "array<") && strings.HasSuffix(typ, ">") {
+		return map[string]any{"array": map[string]any{"elem": typ[6 : len(typ)-1], "items": []any{}}}
+	}
+	switch typ {
 	case "string":
 		return lit("string", "")
 	case "boolean":
@@ -1132,6 +1362,22 @@ func zeroLiteral(e ast.Expr) any {
 	default:
 		return lit("null", nil)
 	}
+}
+
+func namedReturn(results *ast.FieldList) (string, ast.Expr, bool) {
+	if results == nil || len(results.List) != 1 {
+		return "", nil, false
+	}
+	field := results.List[0]
+	if len(field.Names) != 1 {
+		return "", nil, false
+	}
+	return field.Names[0].Name, field.Type, true
+}
+
+func isIdentCall(call *ast.CallExpr, name string) bool {
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == name
 }
 
 func sortStrings(s []string) {

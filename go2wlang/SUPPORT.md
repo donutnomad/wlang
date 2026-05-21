@@ -63,11 +63,14 @@
 - `a, b = call()`
 - `_ = expr`
 - `return expr`
+- `return`（用于无返回值函数字面量）
+- 命名返回值函数，例如 `func Rule(...) (err error)`
 - `if cond { ... }`
 - `if cond { ... } else { ... }`
 - `if cond { ... } else if cond { ... }`
 - 计数循环：`for i := from; i < to; i++ { ... }`
 - 带步长的计数循环：`for i := from; i < to; i += step { ... }`
+- 反向计数循环：`for i := len(xs)-1; i >= 0; i-- { ... }`
 - range 循环：`for i, item := range xs { ... }`
 - range 循环：`for _, item := range xs { ... }`
 - `break`
@@ -75,6 +78,7 @@
 - `panic(expr)`
 - `defer pkg.Call(args...)`
 - `defer receiver.Call(args...)`
+- `defer func(){ ... }()`
 - `go pkg.Call(args...)`
 - `go func(){ ... }()`
 - channel 发送语句：`ch <- value`
@@ -96,7 +100,6 @@
 - 带参数的 `go` 函数字面量调用。
 - 包级变量。
 - `init` 函数。
-- 命名返回值变更。
 - `recover`。
 
 ## 表达式
@@ -116,6 +119,9 @@
 - 布尔运算 `&&`、`||`
 - 括号表达式
 - 接收表达式：`<-ch`
+- 索引表达式：`xs[i]` 生成 `arr.get(xs, i)`。
+- 函数字面量作为值。
+- 函数变量调用：`fn(args...)`。
 - 函数风格的 `int64(expr)` 转换。
 
 当前范围外：
@@ -123,12 +129,10 @@
 - 一元 `-`、`+`、`^`、`&`、`*`
 - 指针解引用
 - 指针取址
-- 索引表达式：`xs[i]`、`m[k]`
+- map 索引表达式：`m[k]`
 - 切片表达式：`xs[a:b]`
 - 类型断言
-- 函数字面量作为值。
 - 方法值。
-- 函数值。
 - 泛型专属表达式。
 - 反射和 `unsafe`。
 
@@ -138,6 +142,8 @@
 
 - 包函数调用：`demo.Score(user, total)`
 - 接收者方法调用：`svc.Run(input)`
+- 当前包函数调用：`BuildFailureReason(step, err)`
+- 函数值调用：`compensations[i](ctx, reason)`
 - 作为表达式使用的调用。
 - 作为语句使用的调用。
 - `defer` 使用的调用。
@@ -151,13 +157,13 @@
 - `close(ch)`
 - `panic(v)`
 - `int64(v)`
+- `len(xs)` 生成 `arr.len(xs)`
+- `append(xs, v)` 在 `xs = append(xs, v)` 中生成 `arr.push(xs, v)`
 
 当前范围外：
 
-- 将普通函数调用（例如 `helper(x)`）作为宿主调用。
 - 可变参数展开：`fn(xs...)`。
-- `append`、`copy`、`delete`、`len`、`cap`、`new`、`complex`、`real`、`imag` 等内建函数。
-- 通过函数变量发起调用。
+- `copy`、`delete`、`cap`、`new`、`complex`、`real`、`imag` 等内建函数。
 
 ## 复合字面量
 

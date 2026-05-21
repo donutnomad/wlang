@@ -46,6 +46,28 @@ type Call struct {
 	Args []Node
 }
 
+// FuncParam is one parameter in a wflang function literal.
+type FuncParam struct {
+	Name string
+	Type string
+}
+
+// FuncLit creates a first-class function value. Runtime evaluation captures
+// the current lexical scope by reference.
+type FuncLit struct {
+	Base
+	Params  []FuncParam
+	Returns []string
+	Body    []Node
+}
+
+// FuncCall invokes a first-class function value.
+type FuncCall struct {
+	Base
+	Fn   Node
+	Args []Node
+}
+
 // IfExpr is the expression form of if (§16.4).
 type IfExpr struct {
 	Base
@@ -110,7 +132,8 @@ type Set struct {
 // Return ends the program with a value.
 type Return struct {
 	Base
-	Expr Node
+	Expr  Node
+	Named string
 }
 
 // IfStmt is the block form of if (also used by if expression statements).
@@ -180,7 +203,8 @@ type Routine struct {
 // the time of execution.
 type Defer struct {
 	Base
-	Call *Call
+	Call *Call // legacy host-call form
+	Expr Node  // *Call or *FuncCall
 }
 
 // MapLit builds a map<K,V> literal (LANGUAGE.md §2.1 / §3.8).

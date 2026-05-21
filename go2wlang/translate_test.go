@@ -164,6 +164,258 @@ func Rule(booker api.Booker, input string) api.Result {
 	}
 }
 
+func TestTranslateFileClosureCompensationSubset(t *testing.T) {
+	src := []byte(`package orders
+
+import (
+	temporal "example.com/temporal"
+	workflow "example.com/workflow"
+)
+
+type FailureReason struct {
+	FailedStep string
+	Message    string
+	Type       string
+}
+
+type OrderInput struct {
+	OrderID string
+}
+
+type ReserveResult struct {
+	ID string
+}
+
+type MarkFailedInput struct {
+	OrderID    string
+	ReserveID  string
+	FailedBy   string
+	Reason     string
+	ReasonType string
+}
+
+func OrderWorkflow(ctx workflow.Context, runner workflow.Runner, input OrderInput) (err error) {
+	var compensations []func(workflow.Context, FailureReason) error
+	failedStep := ""
+	reserve := ReserveResult{ID: ""}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+
+		reason := BuildFailureReason(failedStep, err)
+
+		for i := len(compensations) - 1; i >= 0; i-- {
+			compErr := compensations[i](ctx, reason)
+			if compErr != nil {
+				err = temporal.NewApplicationError(
+					"workflow failed and compensation failed",
+					"CompensationFailed",
+					compErr,
+				)
+				return
+			}
+		}
+	}()
+
+	failedStep = "step1_reserve"
+	reserve = workflow.Reserve(ctx, input.OrderID)
+	compensations = append(compensations, func(ctx workflow.Context, reason FailureReason) error {
+		return workflow.MarkReserveFailed(ctx, MarkFailedInput{
+			OrderID:    input.OrderID,
+			ReserveID:  reserve.ID,
+			FailedBy:   reason.FailedStep,
+			Reason:     reason.Message,
+			ReasonType: reason.Type,
+		})
+	})
+
+	failedStep = "step10_pay"
+	err = runner.Pay(ctx, input.OrderID)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "OrderWorkflow"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: wflang.DefaultRegistry()})
+	if _, err := eng.CompileJSON(out); err != nil {
+		t.Fatalf("generated JSON should parse and typecheck: %v\n%s", err, out)
+	}
+	got := string(out)
+	for _, needle := range []string{
+		`"named": "err"`,
+		`"fn": {`,
+		`"call": {`,
+		`"arr.push":`,
+		`"arr.get":`,
+		`"arr.len":`,
+		`"NewApplicationError":`,
+		`"Pay":`,
+		`"MarkReserveFailed":`,
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in:\n%s", needle, got)
+		}
+	}
+}
+
+func TestTranslateFileFunctionValueParameterCall(t *testing.T) {
+	src := []byte(`package rules
+
+func Rule(fn func(string) string, input string) string {
+	return fn(input)
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	got := string(out)
+	for _, needle := range []string{
+		`"call":`,
+		`"var": "fn"`,
+		`"var": "input"`,
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in:\n%s", needle, got)
+		}
+	}
+}
+
+func TestTranslateFileAppendMultipleValues(t *testing.T) {
+	src := []byte(`package rules
+
+func Rule() []int64 {
+	var xs []int64
+	xs = append(xs, 1, 2)
+	return xs
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	got := string(out)
+	if strings.Count(got, `"arr.push"`) != 2 {
+		t.Fatalf("want two arr.push calls in:\n%s", got)
+	}
+}
+
+func TestTranslateFileRejectsUnsupportedClosureAndAppendShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "function literal parameter must be named",
+			src: `package rules
+func Rule() {
+	f := func(string) error { return nil }
+	_ = f
+}
+			`,
+			want: "function literal parameters must be named",
+		},
+		{
+			name: "function literal parameter type unsupported",
+			src: `package rules
+func Rule() {
+	f := func(ch chan string) { _ = ch }
+	_ = f
+}
+`,
+			want: "function parameter type is not supported",
+		},
+		{
+			name: "function literal result type unsupported",
+			src: `package rules
+func Rule() {
+	f := func() chan string { return nil }
+	_ = f
+}
+`,
+			want: "function result type is not supported",
+		},
+		{
+			name: "append target mismatch",
+			src: `package rules
+func Rule(xs []int64, ys []int64) {
+	xs = append(ys, 1)
+}
+`,
+			want: "append target must match assignment target",
+		},
+		{
+			name: "append target must be identifier",
+			src: `package rules
+func Rule(xs []int64) {
+	xs = append(xs[:], 1)
+}
+`,
+			want: "append target must match assignment target",
+		},
+		{
+			name: "append requires value",
+			src: `package rules
+func Rule(xs []int64) {
+	xs = append(xs)
+}
+`,
+			want: "append requires a slice and at least one value",
+		},
+		{
+			name: "append item expression unsupported",
+			src: `package rules
+func Rule(xs []int64, x any) {
+	xs = append(xs, x.(int64))
+}
+`,
+			want: "type assertions are not supported",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := go2wlang.TranslateFile([]byte(tc.src), go2wlang.Options{FuncName: "Rule"})
+			if err == nil {
+				t.Fatalf("want diagnostic containing %q", tc.want)
+			}
+			var diag *go2wlang.DiagnosticError
+			if !errors.As(err, &diag) {
+				t.Fatalf("err = %T %[1]v, want DiagnosticError", err)
+			}
+			if !strings.Contains(diag.Reason, tc.want) {
+				t.Fatalf("want %q, got %q", tc.want, diag.Reason)
+			}
+		})
+	}
+}
+
+func TestTranslateFileFunctionLiteralNamedResults(t *testing.T) {
+	src := []byte(`package rules
+
+func Rule() {
+	f := func() (err error) { return nil }
+	_ = f
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `"returns":`) || !strings.Contains(got, `"error"`) {
+		t.Fatalf("missing named error return in:\n%s", got)
+	}
+}
+
 func TestTranslateFileUnsupportedReportsDiagnostic(t *testing.T) {
 	src := []byte(`package rules
 
@@ -233,6 +485,32 @@ func TestExampleApprovalRuleTranslates(t *testing.T) {
 		"select {",
 		"recv events -> msg, ok {",
 		"return decision",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in:\n%s", needle, got)
+		}
+	}
+}
+
+func TestExampleOrderWorkflowTranslates(t *testing.T) {
+	path := filepath.Join("examples", "order_workflow.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "OrderWorkflow"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	got := string(out)
+	for _, needle := range []string{
+		`"named": "err"`,
+		`"arr.push"`,
+		`"arr.get"`,
+		`"arr.len"`,
+		`"fn"`,
+		`"call"`,
+		`"NewApplicationError"`,
 	} {
 		if !strings.Contains(got, needle) {
 			t.Fatalf("missing %q in:\n%s", needle, got)

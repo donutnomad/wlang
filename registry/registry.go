@@ -1005,7 +1005,7 @@ func wrapResult(v reflect.Value) types.Value {
 // coerce converts a typed Value into a reflect.Value of target type.
 func coerce(v types.Value, target reflect.Type) (reflect.Value, error) {
 	// Null -> zero of target if allowed.
-	if v.IsNull() {
+	if v.IsNull() || v.Go() == nil {
 		if target.Kind() == reflect.Pointer || target.Kind() == reflect.Interface ||
 			target.Kind() == reflect.Slice || target.Kind() == reflect.Map {
 			return reflect.Zero(target), nil

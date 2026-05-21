@@ -25,6 +25,10 @@ func (e *Executor) Eval(n ast.Node) (types.Value, error) {
 		return e.evalPkg(x)
 	case *ast.Array:
 		return e.evalArray(x)
+	case *ast.FuncLit:
+		return e.evalFuncLit(x)
+	case *ast.FuncCall:
+		return e.evalFuncCall(x)
 	case *ast.IfStmt:
 		return e.evalIfExpr(x)
 	case *ast.Routine:
@@ -268,6 +272,9 @@ func init() {
 		"contains":   stringBinOp("contains"),
 		"startsWith": stringBinOp("startsWith"),
 		"endsWith":   stringBinOp("endsWith"),
+		"arr.push":   arrayPush,
+		"arr.get":    arrayGet,
+		"arr.len":    arrayLen,
 		"m.get":      mapGet,
 		"m.set":      mapSet,
 		"m.del":      mapDel,
@@ -757,7 +764,7 @@ func equalityOp(want bool) opHandler {
 }
 
 func equalValues(a, b types.Value) bool {
-	if a.IsNull() && b.IsNull() {
+	if nullLike(a) && nullLike(b) {
 		return true
 	}
 	if a.TypeName() != b.TypeName() {
@@ -770,6 +777,10 @@ func equalValues(a, b types.Value) bool {
 		return a.Go().(*big.Rat).Cmp(b.Go().(*big.Rat)) == 0
 	}
 	return reflect.DeepEqual(a.Go(), b.Go())
+}
+
+func nullLike(v types.Value) bool {
+	return v.IsNull() || v.Go() == nil
 }
 
 func logicalAnd(e *Executor, c *ast.Call) (types.Value, error) {

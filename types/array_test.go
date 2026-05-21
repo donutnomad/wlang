@@ -37,6 +37,60 @@ func TestArrayElementCheck(t *testing.T) {
 	}
 }
 
+func TestArrayAnyAllowsMixedAndNullElements(t *testing.T) {
+	v, err := NewArray(TAny, []Value{
+		mustLit(t, TString, "abc"),
+		mustLit(t, TInt64, "1"),
+		{typ: TNull, val: nil},
+	})
+	if err != nil {
+		t.Fatalf("NewArray(any): %v", err)
+	}
+	if v.TypeName() != "array<any>" {
+		t.Fatalf("type: %s", v.TypeName())
+	}
+	arr, ok := v.Go().([]any)
+	if !ok {
+		t.Fatalf("Go(): %T", v.Go())
+	}
+	if len(arr) != 3 || arr[0] != "abc" || arr[1] != int64(1) || arr[2] != nil {
+		t.Fatalf("contents: %#v", arr)
+	}
+}
+
+func TestArrayCarrierCheckForBuiltinElements(t *testing.T) {
+	cases := []struct {
+		elem string
+		val  any
+	}{
+		{TInt8, int8(1)},
+		{TInt16, int16(1)},
+		{TInt32, int32(1)},
+		{TInt64, int64(1)},
+		{TUint8, uint8(1)},
+		{TUint16, uint16(1)},
+		{TUint32, uint32(1)},
+		{TUint64, uint64(1)},
+		{TFloat32, float32(1)},
+		{TFloat64, float64(1)},
+		{TBoolean, true},
+		{TString, "x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.elem, func(t *testing.T) {
+			_, err := NewArray(tc.elem, []Value{NewValue(tc.elem, tc.val)})
+			if err != nil {
+				t.Fatalf("NewArray(%s): %v", tc.elem, err)
+			}
+		})
+	}
+
+	_, err := NewArray(TInt64, []Value{NewValue(TInt64, "bad-carrier")})
+	if err == nil {
+		t.Fatal("want invalid carrier error")
+	}
+}
+
 // TC-016 自动宿主类型名
 type book struct{}
 

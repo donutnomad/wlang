@@ -276,6 +276,27 @@ func foldNode(n ast.Node) (ast.Node, error) {
 			return x, nil
 		}
 		return x, foldBlock(x.Body)
+	case *ast.Defer:
+		if x.Expr != nil {
+			e, err := foldNode(x.Expr)
+			if err != nil {
+				return nil, err
+			}
+			x.Expr = e
+			if c, ok := e.(*ast.Call); ok {
+				x.Call = c
+			}
+		} else if x.Call != nil {
+			c, err := foldNode(x.Call)
+			if err != nil {
+				return nil, err
+			}
+			if cc, ok := c.(*ast.Call); ok {
+				x.Call = cc
+				x.Expr = cc
+			}
+		}
+		return x, nil
 	case *ast.Array:
 		for i, item := range x.Items {
 			f, err := foldNode(item)
@@ -294,6 +315,22 @@ func foldNode(n ast.Node) (ast.Node, error) {
 			x.Args[i] = f
 		}
 		return foldCall(x), nil
+	case *ast.FuncLit:
+		return x, foldBlock(x.Body)
+	case *ast.FuncCall:
+		fn, err := foldNode(x.Fn)
+		if err != nil {
+			return nil, err
+		}
+		x.Fn = fn
+		for i, a := range x.Args {
+			f, err := foldNode(a)
+			if err != nil {
+				return nil, err
+			}
+			x.Args[i] = f
+		}
+		return x, nil
 	}
 	return n, nil
 }

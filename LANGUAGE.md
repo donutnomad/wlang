@@ -59,6 +59,8 @@ wflang 的目标是把 JSON 从配置格式提升为可执行程序格式：
 | 包函数注册 | 已具备 | `registry/registry.go` |
 | Go 函数反射绑定 | 已具备 | `registry/registry.go` |
 | 类型构造与拆包 | 已具备 | `types/types.go` + `registry/registry.go` |
+| tuple 解构 | 已具备 | `compiler/parse.go` + `runtime/exec.go` |
+| map / struct / chan 字面量 | 已具备 | `compiler/parse.go` + `runtime/literals.go` |
 
 内置类型也是映射类型：左侧是 wflang 中使用的类型名，右侧是对应的 Go 类型。语言运行时只认识类型名；实际值、构造、方法调用和错误承载都由映射的 Go 类型完成。
 
@@ -202,6 +204,11 @@ Go struct 字段可通过 `json` 或 `yaml` tag 暴露给语言读取。
 | `continue` | 已具备 | 跳过当前循环剩余语句 |
 | `panic` | 已具备 | 映射 Go `panic` 关键字 |
 | `routine` | 已具备 | 映射 Go `go` 关键字 |
+| `await` | 已具备 | 等待 `routineHandle` |
+| `expr` | 已具备 | 执行表达式并丢弃结果 |
+| `defer` | 已具备 | 作用域退出时 LIFO 执行调用 |
+| `match` | 已具备 | 多分支值匹配 |
+| `select` | 已具备 | channel send / recv 多路选择 |
 
 ### 2.5 Go 宿主桥接
 
@@ -253,14 +260,18 @@ registry.BindGoPackage("books", booksPackage)
 
 当前签名约定：
 
-- Go 函数返回 `(T, error)`。
 - 参数类型通过反射映射到语言类型。
 - 返回类型可自动推断，也可显式指定。
 - 可变参数可映射为语言函数可变参数。
 - Go 返回的 `error` 映射为语言内置 `error` 类型，语义与 Go `error` 接口一致。
 - `error` 类型只自动暴露 Go 方法集；Go `error` 接口只有 `Error() string`，语言中只能调用 `Error` 映射出来的 operator。
-- 默认执行模式中，`error != nil` 会中断当前表达式；`try` 启用后，`error` 可作为普通语言值返回给程序处理。
-- 前台宿主调用按普通 Go 调用处理返回值和 `error`。
+- `func(...)` 返回 `null`。
+- `func(...) error` 返回 `error` typed value，nil error 的 Go 承载值为 `nil`。
+- `func(...) T` 返回 `T`。
+- `func(...) (T, error)` 返回 `tuple<T,error>`。
+- `func(...) (T1, T2, ..., Tn)` 返回 `tuple<T1,T2,...,Tn>`。
+- `func(...) (T1, T2, ..., Tn, error)` 返回 `tuple<T1,T2,...,Tn,error>`。
+- Go panic、context cancel、预算耗尽和语言诊断错误以 `LangError` 形式中断执行。
 
 目标桥接模型以 Go 类型自动绑定为主：宿主注册 Go 类型后，Registry 通过反射扫描该类型的可导出方法，自动生成语言方法表。
 
@@ -571,17 +582,18 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 | `let` | 核心语句 | 定义变量 |
 | `set` | 核心语句 | 修改变量 |
 | `if` | 核心语句 | 条件分支 |
-| `foreach` | 核心语句 | 遍历数组 |
+| `foreach` | 核心语句 | 遍历数组或 map |
 | `fori` | 核心语句 | 按整数下标循环 |
 | `return` | 核心语句 | 返回结果 |
 | `break` | 核心语句 | 退出最近一层循环 |
 | `continue` | 核心语句 | 进入最近一层循环的下一次迭代 |
 | `panic` | 核心语句 | 触发 Go `panic(value)` |
-| `routine` | 核心语句 | 通过 Go `go` 关键字启动宿主调用 |
+| `routine` | 核心语句 | 通过 Go `go` 关键字启动宿主调用或语句块 |
+| `await` | 核心语句 | 等待 routine handle |
 | `expr` | 核心语句 | 显式执行表达式并丢弃结果 |
-| `block` | 推荐新增 | 显式创建局部作用域 |
-| `try` | 推荐新增 | 捕获语言错误并转为值 |
-| `assert` | 推荐新增 | 程序内断言 |
+| `defer` | 核心语句 | 作用域退出时执行宿主调用或函数值调用 |
+| `match` | 核心语句 | 多分支值匹配 |
+| `select` | 核心语句 | channel 多路选择 |
 
 #### `return`
 
@@ -589,6 +601,12 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 
 ```json
 { "return": { "var": "total" } }
+```
+
+命名返回读取当前作用域中的变量，并在 defer 执行后返回该变量的最终值：
+
+```json
+{ "return": { "named": "err" } }
 ```
 
 #### `foreach`
@@ -700,12 +718,12 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 - `expr` 接受任意表达式。
 - 表达式按正常求值流程执行。
 - 求值产生的 typed value 被丢弃，不写入任何变量。
-- 表达式求值过程中产生的 Go `error` 按第 9 节"错误短路语义"处理。
+- host call 返回的 Go `error` 按第 9 节进入返回值形态；语言诊断错误继续中断执行。
 - `expr` 不影响作用域，也不创建 block。
 
 #### `routine`
 
-`routine` 映射 Go `go` 关键字，把**一个宿主调用**放入新的 goroutine 执行，并立即返回 `routineHandle`。
+`routine` 映射 Go `go` 关键字，把宿主调用或 wflang 语句块放入新的 goroutine 执行，并立即返回 `routineHandle`。
 
 ```json
 {
@@ -720,12 +738,13 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 
 语义规则：
 
-- `routine` 的参数**必须是单个宿主调用表达式**：`{ "GoName": [receiver, ...args] }`。
-- `routine` 先在当前 goroutine 中求值 receiver 和参数。
-- 求值完成后，执行器用 Go `go` 关键字启动该宿主调用。
+- 单调用形态：`{"routine":{"GoName":[receiver,...args]}}`。
+- 语句块形态：`{"routine":{"do":[stmt1,stmt2,...]}}`。
+- 单调用形态先在当前 goroutine 中求值 receiver 和参数，启动后执行捕获到的调用快照。
+- 语句块形态使用 child Executor 和独立 root scope 执行 body。
 - `routine` 自身立即返回 `routineHandle`。
-- goroutine 内的 Go 返回值或 Go `error` 写入 handle。
-- fire-and-forget 使用中，goroutine 内的 Go `error` 同时进入宿主 `RoutineErrorHandler`。
+- goroutine 内的最终 typed value 写入 handle。
+- goroutine 内的 `LangError` 写入 handle；fire-and-forget 使用中也进入宿主 `RoutineErrorHandler`。
 - `routine` 需要 `routine:spawn` capability。
 - `routine` 受 `MaxRoutines` 预算限制。
 
@@ -744,21 +763,83 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 
 - `await` 单个 handle 时，返回该 routine 的业务返回值。
 - `await` 多个 handle 时，按输入顺序返回 `array<any>`。
-- 无业务返回值或仅 `error` 成功时返回 `null`。
+- 无返回值时返回 `null`。
+- 仅 `error` 返回值时返回 `error` typed value，nil error 的 Go 承载值为 `nil`。
 - 单业务返回值返回单个 typed value。
-- 多业务返回值返回 `tuple<T1,T2,...>`。
-- routine 返回 Go `error` 时，`await` 按普通错误短路；`try` 可捕获该错误。
+- 多返回值返回 `tuple<T1,T2,...>`，包含最后一位 `error` slot。
+- routine 内部产生的 `LangError` 由 `await` 返回给宿主。
 - 同一个 handle 可重复 `await`，结果或错误会缓存并复用。
 
-设计约束（**为什么 routine 不能包一段语句序列**）：
+#### `defer`
 
-- wflang 的定位是 JSON 宿主调用语言，负责流程编排和调用分派，不负责管理并发运行时。
-- 允许 `routine` 内嵌 `let`/`set`/`foreach` 等语句，会引入：子 goroutine 的独立作用域栈、闭包变量快照 vs 引用的抉择、父子作用域竞态、跨 goroutine 的 `return` / `break` 语义、跨 goroutine 的错误冒泡路径。这些属于真正编程语言的运行时责任，与语言定位冲突。
-- 需要"在 goroutine 里跑一段复杂流程"时，正确做法是在 Go 宿主侧定义一个函数封装该流程，再用 `routine` 启动这个函数调用。并发的复杂性留在 Go，wflang 只负责"启动哪个调用、传什么参数"。
+`defer` 记录一个宿主调用或函数值调用，在当前作用域退出时按 LIFO 顺序执行。receiver、函数值和参数在 `defer` 语句执行时求值并捕获。
+
+```json
+{ "defer": { "Close": [{ "pkg": "audit" }, { "var": "id" }] } }
+```
+
+```json
+{
+  "defer": {
+    "call": {
+      "fn": {
+        "fn": {
+          "params": [],
+          "returns": [],
+          "do": [
+            { "set": { "err": { "literal": { "type": "string", "value": "deferred" } } } }
+          ]
+        }
+      },
+      "args": []
+    }
+  }
+}
+```
+
+语义规则：
+
+- `defer` 接受单个宿主调用或单个函数值调用。
+- 顶层 program 也是隐式作用域，顶层 defer 在 program 结束时执行。
+- `foreach`、`fori`、`if`、`select`、`routine.do` 的块作用域都会运行各自 defer。
+- deferred 调用返回的 Go `error` 仍按 host call 返回形态产生 typed value；调用自身产生的 `LangError` 会在原执行路径无错误时作为该作用域错误返回。
+
+#### 函数值
+
+`fn` 创建一等函数值，`call` 调用函数值。函数字面量按引用捕获当前 lexical scope，因此函数体内的 `set` 会修改被捕获变量。
+
+```json
+{
+  "fn": {
+    "params": [["ctx", "workflow.Context"], ["reason", "FailureReason"]],
+    "returns": ["error"],
+    "do": [
+      { "return": { "MarkFailed": [{ "pkg": "workflow" }, { "var": "ctx" }, { "var": "reason" }] } }
+    ]
+  }
+}
+```
+
+```json
+{
+  "call": {
+    "fn": { "var": "comp" },
+    "args": [{ "var": "ctx" }, { "var": "reason" }]
+  }
+}
+```
+
+语义规则：
+
+- 函数类型写作 `func<(T1,T2)->R>`；多返回使用 `func<(T1)->R1,R2>`。
+- 参数在调用时创建新的函数调用作用域。
+- 函数体内的 `return` 结束当前函数调用。
+- 返回值类型必须匹配 `returns`；`returns` 为空时调用结果为 `null`。
+- `error` 返回允许 `null` 表示 nil error。
 
 ### 3.4 变量模型
 
-当前变量模型是动态作用域栈，推荐固化为词法作用域栈：
+当前变量模型是作用域栈：
 
 - `let` 在当前 block 创建变量。
 - `set` 修改最近的同名变量。
@@ -766,7 +847,7 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 - 宿主调用结果通过 `let`、`set`、`return` 或 `expr` 承接。
 - 变量路径读取只读视图，复杂路径操作通过宿主包函数完成。
 
-推荐新增解构：
+单 binding：
 
 ```json
 {
@@ -777,7 +858,7 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 }
 ```
 
-推荐新增变量声明类型：
+变量声明类型：
 
 ```json
 {
@@ -789,6 +870,25 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
   }
 }
 ```
+
+tuple 解构：
+
+```json
+{
+  "let": [
+    ["value", "err"],
+    ["string", "error"],
+    { "Fetch": [{ "pkg": "books" }, { "var": "id" }] }
+  ]
+}
+```
+
+解构规则：
+
+- 右侧表达式必须求值为 `tuple<T1,...,Tn>`。
+- 目标数量必须与 tuple arity 一致。
+- 目标名 `_` 会丢弃对应位置。
+- 可选类型数组用于校验对应位置的类型。
 
 ### 3.5 顶级运行上下文
 
@@ -886,6 +986,16 @@ session := engine.NewSession(wflang.SessionOptions{
 - 命中 Go `slice` / `array` / wflang `array<T>` 时，段必须是非负十进制整数，否则触发 `var` 缺省值或返回诊断错误。
 - 无法用 `var` 表达的 map key（包含 `.`、空字符串、二进制数据等）必须通过宿主 `path.Get` 函数读取；`path.Get` 接受显式的路径段数组。
 
+数组内建操作：
+
+| 操作 | JSON | 结果 |
+|------|------|------|
+| 追加 | `{ "arr.push": [ { "var": "xs" }, value ] }` | 原地追加，返回 `null` |
+| 读取 | `{ "arr.get": [ xs, index ] }` | 返回元素 `T` |
+| 长度 | `{ "arr.len": [ xs ] }` | 返回 `int64` |
+
+`arr.push` 的第一个参数必须是数组变量，追加后更新该变量。元素类型必须匹配 `array<T>` 的 `T`，数组长度受 `Budget.MaxArrayLength` 约束。
+
 ---
 
 ## 4. 类型系统目标
@@ -941,7 +1051,7 @@ registry.AutoBindType("address", reflect.TypeFor[common.Address]())
 - 自动绑定负责扫描 Go 导出方法，并生成语言 operator。
 - Go 方法返回的 `error` 映射为内置 `error` 类型。
 - `error` 和其他映射类型相同：wflang 类型名为 `error`，Go 类型为 `error`，可调用方法来自 Go 方法集。
-- 执行模式可选择：error 直接中断执行，或通过 `try` 捕获为 `error` 值。
+- Go `error` 作为普通值进入函数返回形态；语言诊断错误使用 `LangError` 中断执行。
 
 ### 4.2.2 自动宿主类型映射
 
@@ -992,18 +1102,17 @@ func QueryBook(id int64) (*books.Book, int64, bool, string, error) { ... }
 
 映射规则：
 
-- 最后一个返回值如果实现 `error`，它是错误通道。
-- 最后一个 `error` 前面的所有返回值组成 result。
-- 只有一个业务返回值时，result 是该 typed value。
-- 有多个业务返回值时，result 是 `tuple<T1,T2,...>`。
-- 只有 `error` 返回值时，`error == nil` 的 result 是 `null`。
+- 无返回值时结果是 `null`。
+- 单返回值 `T` 的结果是 `T`。
+- 单返回值 `error` 的结果是 `error` typed value，nil error 的 Go 承载值为 `nil`。
+- 多返回值全部组成 `tuple<T1,T2,...>`。
+- 最后一位返回值如果实现 `error`，它也作为 tuple 末位保留。
 - 业务返回值类型未注册时，按自动宿主类型映射规则生成类型名。
-- `error != nil` 时默认执行模式停止；`try` 启用后返回 `error` typed value。
 
 示例 result：
 
 ```text
-tuple<*github.com/acme/books.Book,int64,boolean,string>
+tuple<*github.com/acme/books.Book,int64,boolean,string,error>
 ```
 
 ### 4.3 类型推断
@@ -1202,9 +1311,9 @@ result, err := session.AppendRun(ctx, json.RawMessage(`[
 
 - `routine` 启动后台 host call 并返回 `routineHandle`。
 - `await` 等待 handle 完成并读取结果。
-- 多业务返回值按 `tuple<T1,T2,...>` 返回。
+- 多返回值按 `tuple<T1,T2,...>` 返回，包含最后一位 `error` slot。
 - 多 handle await 按输入顺序返回 `array<any>`。
-- host call 返回 `error` 时，`await` 走普通错误路径。
+- routine 内部产生 `LangError` 时，`await` 将该错误返回给宿主。
 
 ### 5.3 函数注册目标
 
@@ -1218,7 +1327,7 @@ func(args ...T) (R, error)
 func(ctx context.Context, args ...T) (R, error)
 ```
 
-wflang 按语句和表达式顺序调用函数。前台函数调用返回 Go `error` 时，执行器按普通错误路径处理。`routine` 内部函数调用返回 Go `error` 时，错误写入 `routineHandle`；裸 routine 同时把错误交给 `RoutineErrorHandler`。
+wflang 按语句和表达式顺序调用函数。Go `error` 返回值作为 `error` typed value 进入返回形态。routine 内部产生的 `LangError` 写入 `routineHandle`；裸 routine 同时把该错误交给 `RoutineErrorHandler`。
 
 包函数元数据：
 
@@ -1281,10 +1390,10 @@ engine := wflang.NewEngine(wflang.EngineOptions{
 
 事务与副作用编排由宿主负责，语言本体不提供事务语句：
 
-- wflang 只描述"调哪些函数、以什么顺序调、出错怎么冒泡"，不决定这些调用是否在同一个 Go 事务里执行。
+- wflang 只描述"调哪些函数、以什么顺序调、返回值如何承接"，事务边界由宿主决定。
 - 事务上下文通过 `context.Context` 从 `program.Run` 或 `AppendRun` 的 ctx 注入到 Go 宿主函数。需要事务时，宿主应在进入 `Run` 前 `ctx = txutil.WithTx(ctx, tx)`，所有相关宿主函数从 ctx 取出同一个事务对象。
 - 一次 `Run` 或 `AppendRun` 的所有前台宿主调用共享同一个 ctx；`routine` 内部宿主调用共享派生自启动点的 ctx。
-- 语言层默认短路（9.1.1）只影响执行流，不会回滚已发生的副作用；是否在 error 时回滚事务由宿主在 `Run` 返回后根据 error 决定。
+- 已完成的副作用保留；事务提交或回滚由宿主根据显式返回值和 `LangError` 判断。
 
 Go 到 wflang 的转换对象是 Registry 中绑定的包函数、类型方法、类型映射和由 Go Builder 描述的调用图。普通 Go 业务逻辑先通过 `BindGoPackage`、`AutoBindType`、`BindMethodOverloads` 暴露为语言可调用能力，再由配置生成器输出 JSON AST。
 
@@ -1404,7 +1513,7 @@ result, err := program.Run(ctx, wflang.RunOptions{
 - `CallPlan` 缓存反射调用目标和返回类型。
 - `Run` 按 JSON AST 顺序执行，并通过 Go reflection 调用宿主函数或方法。
 - Go 返回值映射为 wflang typed value。
-- Go `error` 映射为内置 `error` 或执行错误路径。
+- Go `error` 映射为内置 `error` typed value。
 - routine 返回 `routineHandle`，`await` 读取后台 Go 调用结果。
 
 ### 5.8 Round-trip 验收
@@ -1549,7 +1658,7 @@ result, err := program.Run(ctx, wflang.RunOptions{
 | `Assert` | 断言 |
 | `IsError` | 判断是否为 Go `error` 映射值 |
 
-wflang 本身不支持定义匿名函数、lambda 或用户函数。数组映射、过滤、聚合等逻辑通过 `foreach`、`fori` 和宿主注入函数组合完成。
+wflang 支持一等函数值和闭包捕获。数组映射、过滤、聚合等批量处理逻辑可以通过 `foreach`、`fori`、函数值和宿主注入函数组合完成。
 
 ---
 
@@ -1738,12 +1847,11 @@ type CallPlan struct {
 - 按表达式参数从左到右求值。
 - 根据 `CallPlan` 构造 Go 参数。
 - 调用 Go 函数或方法。
-- `error == nil` 且业务返回值数量为 1 时返回单个 typed value。
-- `error == nil` 且业务返回值数量大于 1 时返回 `tuple<T1,T2,...>`。
-- `error == nil` 且只有 error 返回值时返回 `null` typed value。
-- `error != nil` 且是普通 Go error 时按普通 Go error 处理。
-- routine 调用将返回值或错误写入 `routineHandle`。
-- `await` 读取成功结果，或按普通错误路径返回 routine 错误。
+- 无返回值时返回 `null`。
+- 单返回值时返回单个 typed value；单 `error` 返回值也是 `error` typed value。
+- 多返回值时返回 `tuple<T1,T2,...>`；最后一位 Go `error` 保留为 tuple 的 `error` slot。
+- routine 调用将 typed value 或 `LangError` 写入 `routineHandle`。
+- `await` 读取 routine 的 typed value，或返回 routine 内部产生的 `LangError`。
 
 ### 7.8 Lower / Optimize
 
@@ -1797,9 +1905,9 @@ type CallPlan struct {
 
 - 单 handle 返回该 routine 的 typed value。
 - 多 handle 返回 `array<any>`。
-- 多业务返回值使用 `tuple<T1,T2,...>`。
-- 只有 `error` 返回值且成功时返回 `null`。
-- routine 返回 Go `error` 时，`await` 返回诊断错误。
+- 多返回值使用 `tuple<T1,T2,...>`，包含最后一位 `error` slot。
+- 只有 `error` 返回值时返回 `error` typed value，nil error 的 Go 承载值为 `nil`。
+- routine 内部产生的 `LangError` 由 `await` 返回给宿主。
 - `await` 非 `routineHandle` 返回 `E_TYPE`。
 
 ## 9. 错误模型
@@ -1828,36 +1936,34 @@ err.Error()
 
 Go 函数返回 `(T, error)` 时：
 
-- `error == nil`：表达式结果为 `T`。
-- `error != nil`：默认执行模式中断当前表达式。
-- `try` 启用后：`error` 作为普通 `error` 类型值返回，后续只能调用其 Go 方法集。
+- 表达式结果为 `tuple<T,error>`。
+- nil error 的 tuple 末位是 Go 承载值为 `nil` 的 `error` typed value。
+- 非 nil error 的 tuple 末位是承载原始 Go error 的 `error` typed value。
 
-### 9.1.1 错误短路语义
+### 9.1.1 Host 返回值形态
 
-默认模式下，一个 Go 调用返回 `error != nil` 时的冒泡规则：
+Registry 按 Go 函数签名构造 wflang typed value：
 
-1. 中断当前**宿主调用表达式**的求值。
-2. 该 error 作为当前语句的失败原因，**中止当前语句**（`let`/`set`/`expr`/`return`/`panic` 等）。
-3. 继续冒泡到包含该语句的最近一层**控制结构**：
-   - 在 `if.then` / `if.else` / `foreach.do` / `fori.do` / `block` 内，中止整个该控制结构块的剩余语句。
-   - 冒泡穿过循环时，不执行后续迭代。
-4. 继续冒泡到程序顶层。
-5. 冒泡过程中遇到最近一层的 `try` 语句时被捕获：此时 error 被转化为 typed value `error`，交给 `try` 的 catch 分支处理，冒泡停止。
-6. 没有 `try` 捕获且冒泡到顶层：`program.Run` 返回该 Go `error`，执行终止。
+| Go 返回签名 | wflang 结果 |
+|-------------|-------------|
+| `()` | `null` |
+| `(error)` | `error` typed value，nil error 的 Go 承载值为 `nil` |
+| `(T)` | `T` |
+| `(T, error)` | `tuple<T,error>` |
+| `(T1, T2, ..., Tn)` | `tuple<T1,T2,...,Tn>` |
+| `(T1, T2, ..., Tn, error)` | `tuple<T1,T2,...,Tn,error>` |
 
-`routine` 只包单个宿主调用，其 error 直接进入宿主 `RoutineErrorHandler`，不走上述冒泡流程（routine 内没有可冒泡的语句序列）。
+Go `error` 在上述形态中保持为普通语言值。程序需要通过 tuple 解构、变量传递或调用 `Error` 方法显式处理它。
 
-冒泡过程中被跳过的语句完全不执行，其副作用也不会产生。已执行的副作用（已经完成的 Go 调用）不会被回滚；如需原子性由宿主函数自身处理（例如基于 `context.Context` 传入的事务）。
-
-`error` 值和 `null` 值通过类型区分：一个返回 `(T, error)` 的 Go 调用在 `error == nil` 时产生 `T`（可能是 `null`），在 `error != nil` 时触发上述冒泡流程，而不是产生一个 `error` 类型 typed value。只有 `try` 捕获后才会得到 `error` 类型 typed value。
+Host panic、context cancel、预算耗尽、类型错误、权限错误和 nil receiver 错误使用 `LangError` 报告，直接中断当前执行路径。已完成的副作用不会自动回滚；事务语义由宿主基于 `context.Context` 和返回结果处理。
 
 ### 9.1.2 `null` receiver 调用
 
 调用方法时 receiver 求值结果为 `null`（或 Go 侧的 nil 指针/nil 接口）的处理：
 
 - 编译期无法判定 receiver 非 null 时，生成运行期 null 检查。
-- 运行期 receiver 为 null 时，**不**进入 Go 反射调用，直接产生 `E_NIL_RECEIVER` 诊断错误。
-- `E_NIL_RECEIVER` 按 9.1.1 错误短路语义冒泡，可被 `try` 捕获。
+- 运行期 receiver 为 null 时，跳过 Go 反射调用，直接产生 `E_NIL_RECEIVER` 诊断错误。
+- `E_NIL_RECEIVER` 是 `LangError`，会中断当前执行路径。
 - 宿主若希望方法接受 nil receiver，应将该方法改为包级函数（`{"pkg":...}` receiver 不会为 null）。
 
 ### 9.2 语言诊断错误
@@ -2143,190 +2249,28 @@ Go 配置生成器目标：
 
 ---
 
-## 14. 当前需要改善的功能
+## 14. 当前维护清单
 
-### 14.1 类型系统改善
+当前实现已经覆盖语言内核、Go 宿主桥接、tuple 解构、`defer`、map、struct literal、channel/select、routine block、formatter、linter、test runner 和 go2wlang 可翻译 Go 子集。后续维护重点集中在工程化深度和标准库广度。
 
-| 改善项 | 目标 |
-|--------|------|
-| `null` 独立类型 | 空值语义清晰化 |
-| 参数数量严格校验 | 编译期捕获函数调用错误 |
-| 反射调用安全检查 | 类型错配转诊断错误 |
-| typed literal 构造错误直返 | 配置错误尽早暴露 |
-| `array<T>` | 数组元素类型检查 |
-
-### 14.2 表达式改善
-
-| 改善项 | 目标 |
-|--------|------|
-| `array<T>` typed literal | 支持数组常量和元素类型校验 |
-| path 包函数 | 统一读取、写入、存在判断 |
-| `match` 表达式 | 多分支值匹配 |
-
-### 14.3 程序执行改善
-
-| 改善项 | 目标 |
-|--------|------|
-| 编译后 Program | 运行阶段复用解析结果 |
-| typed AST | 执行阶段减少动态判断 |
-| 预算控制 | 防止复杂配置耗尽资源 |
-| `block` | 显式作用域 |
-| `try` | 错误值化 |
-| `assert` | 程序内契约 |
-| `panic` | 映射 Go `panic` 关键字 |
-| `routine` | 映射 Go `go` 关键字 |
-| 顶级上下文 | 宿主注入变量和包 receiver |
-
-### 14.4 Go 桥接改善
-
-| 改善项 | 目标 |
-|--------|------|
-| context 参数注入 | 支持取消、超时、trace |
-| Env 参数注入 | 传递当前路径、registry、logger |
-| 函数元数据 | 支持文档、权限、成本 |
-| capability 检查 | 宿主能力授权 |
-| 反射计划缓存 | 降低调用成本 |
-| 注册错误聚合 | 启动阶段发现全部注册问题 |
-| 顶级包注入 | session 级包 receiver 可参与分派 |
-
-### 14.5 静态分析改善
-
-| 改善项 | 目标 |
-|--------|------|
-| 变量声明跟踪 | `let` 后续引用获得类型 |
-| `set` 类型检查 | 赋值安全 |
-| 条件布尔检查 | 分支条件语义稳定 |
-| 分支返回类型合并 | 返回类型可预测 |
-| JSON Pointer 错误路径 | 配置定位精确 |
-| 多错误聚合 | 一次修复多处错误 |
-
-### 14.6 文档与工具改善
-
-| 改善项 | 目标 |
-|--------|------|
-| 语言 schema | IDE 和平台校验 |
-| 标准库文档生成 | Registry 即文档源 |
-| 示例测试联动 | 文档示例全部可运行 |
-| Formatter | 稳定格式化 |
-| Linter | 配置质量把关 |
-| Conformance suite | 第三方宿主可验证实现一致性 |
+| 领域 | 当前后续项 |
+|------|------------|
+| 语言 schema | 补齐 IDE / 平台校验 schema |
+| 标准库 | 增加日期时间、JSON、Regex、error 辅助函数 |
+| 文档生成 | 从 Registry metadata 生成标准库和宿主 API 文档 |
+| Conformance | 固化第三方宿主一致性测试套件 |
+| 性能 | 增加 benchmark suite 和热点回归测试 |
+| 迁移 | 完善版本迁移器和 changelog 生成 |
 
 ---
 
-## 15. 需要完成的功能路线图
+## 15. 演进原则
 
-### 15.1 第一阶段：语言内核稳定
-
-目标：让语言内核可作为独立 Go package 使用。
-
-任务：
-
-1. 建立 `LANGUAGE.md` 与 `README.md` 的职责分工。
-2. 固化 JSON 表达式语法。
-3. 固化 `array<T>` typed literal。
-4. 完成 `null` 类型。
-5. 让 `DefaultRegistry()` 可选择携带核心 intrinsic。
-6. 完成函数调用参数数量严格校验。
-7. 完成 reflect 调用 panic 保护。
-8. 完成 `panic` 操作符。
-9. 完成 `routine` 操作符。
-10. typed literal 构造失败返回诊断错误。
-11. 统一诊断错误码和 JSON Pointer path。
-12. 建立 compile/run API。
-13. 建立顶级上下文注入 API。
-
-验收标准：
-
-- 单独引入 wflang package 即可编译并运行 JSON 程序。
-- 诊断错误都带 path、code、message。
-- 函数调用类型错配返回错误。
-- 标准示例全部进入测试。
-
-### 15.2 第二阶段：强类型编译器
-
-目标：编译期发现绝大多数配置问题。
-
-任务：
-
-1. typed AST。
-2. 变量符号表。
-3. `let/set` 类型传播。
-4. `if`、`foreach`、`return` 类型检查。
-5. `array<T>`。
-6. 函数签名支持可选参数和可变参数。
-7. 多错误聚合。
-8. Explain 静态报告。
-
-验收标准：
-
-- 类型错误在 `Compile` 阶段返回。
-- `Explain` 能列出变量、函数、能力、返回类型。
-- typed AST 执行结果和动态执行结果一致。
-
-### 15.3 第三阶段：宿主桥接完善
-
-目标：Go 宿主能安全、清晰、低成本地扩展语言。
-
-任务：
-
-1. `FuncSpec` 元数据注册。
-2. context / Env 参数注入。
-3. capability 授权。
-4. 函数调用 timeout。
-5. 反射计划缓存。
-6. 自动宿主类型方法导出。
-7. Registry 文档自动生成。
-8. Registry 语言规格导出。
-9. Go Config Builder。
-10. 宿主函数单测工具。
-
-验收标准：
-
-- 宿主函数注册即可生成语言文档和 Builder 元数据。
-- Builder 生成的 JSON 可直接通过 `CompileJSON`。
-- 缺少 capability 的程序在编译阶段或执行前报告。
-- context cancel 能中断执行。
-
-### 15.4 第四阶段：宿主标准库能力
-
-目标：常见 JSON 逻辑直接使用标准库完成。
-
-任务：
-
-1. 字符串、数字、数组、路径、类型转换标准库。
-2. `match` 表达式。
-3. `try/assert/error/panic/routine`。
-4. 日期时间标准库，以 capability 控制当前时间读取。
-5. JSON 标准库。
-6. Regex 标准库。
-
-验收标准：
-
-- 常见数据转换无需宿主新增函数。
-- 标准库全部有文档和测试。
-
-### 15.5 第五阶段：工具链极致化
-
-目标：语言具备工程化体验。
-
-任务：
-
-1. JSON Schema。
-2. Formatter。
-3. Linter。
-4. Test runner。
-5. Trace viewer 数据格式。
-6. Conformance test suite。
-7. Benchmark suite。
-8. Fuzz suite。
-9. 版本迁移器。
-10. 变更日志生成。
-
-验收标准：
-
-- 任何 JSON 程序都可 format、lint、test、explain。
-- 新版本通过 conformance suite。
-- 核心执行性能有基准数据。
+- 新语法必须有 parser、runtime、文档和 SPEC_TESTS 条目同步更新。
+- breaking 语义变更需要版本门控或迁移器。
+- host `error` 保持普通值语义；语言诊断继续使用 `LangError`。
+- 标准库新增能力优先通过 `DefaultRegistry()` 暴露纯函数。
+- go2wlang 继续采用受限 Go 子集，遇到不支持语法返回明确错误。
 
 ---
 

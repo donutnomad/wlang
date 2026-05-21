@@ -173,9 +173,26 @@ func (t *typeChecker) walk(n ast.Node) error {
 			return t.walk(x.Call)
 		}
 		return t.walkBlock(x.Body)
+	case *ast.Defer:
+		if x.Expr != nil {
+			return t.walk(x.Expr)
+		}
+		return t.walk(x.Call)
 	case *ast.Array:
 		for _, it := range x.Items {
 			if err := t.walk(it); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.FuncLit:
+		return t.walkBlock(x.Body)
+	case *ast.FuncCall:
+		if err := t.walk(x.Fn); err != nil {
+			return err
+		}
+		for _, a := range x.Args {
+			if err := t.walk(a); err != nil {
 				return err
 			}
 		}

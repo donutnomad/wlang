@@ -82,6 +82,126 @@ func eqBookRule(user eqUser, booker *eqBooker) eqBookResult {
 	return booker.Book(eqBookArgs{Name: name, Risk: user.Age})
 }
 
+type eqWorkflowContext struct {
+	Log      *[]string
+	FailComp bool
+}
+
+type eqFailureReason struct {
+	FailedStep string
+	Message    string
+	Type       string
+}
+
+type eqOrderInput struct {
+	OrderID string
+}
+
+type eqReserveResult struct {
+	ID string
+}
+
+type eqMarkFailedInput struct {
+	OrderID    string
+	ReserveID  string
+	FailedBy   string
+	Reason     string
+	ReasonType string
+}
+
+type eqWorkflowRunner struct {
+	failPay bool
+}
+
+func (r *eqWorkflowRunner) Pay(ctx eqWorkflowContext, orderID string) error {
+	*ctx.Log = append(*ctx.Log, "pay:"+orderID)
+	if r.failPay {
+		return eqAppError{msg: "pay failed", typ: "PayFailed"}
+	}
+	return nil
+}
+
+type eqAppError struct {
+	msg string
+	typ string
+}
+
+func (e eqAppError) Error() string {
+	return e.typ + ":" + e.msg
+}
+
+func eqBuildFailureReason(step string, err error) eqFailureReason {
+	return eqFailureReason{
+		FailedStep: step,
+		Message:    err.Error(),
+		Type:       "application",
+	}
+}
+
+func eqBuildFailureReasonValue(step string, err error) types.Value {
+	return types.NewValue("eqFailureReason", eqBuildFailureReason(step, err))
+}
+
+func eqReserve(ctx eqWorkflowContext, orderID string) eqReserveResult {
+	*ctx.Log = append(*ctx.Log, "reserve:"+orderID)
+	return eqReserveResult{ID: "reserve-" + orderID}
+}
+
+func eqMarkReserveFailed(ctx eqWorkflowContext, input eqMarkFailedInput) error {
+	*ctx.Log = append(*ctx.Log, "compensate:"+input.OrderID+":"+input.ReserveID+":"+input.FailedBy+":"+input.ReasonType)
+	if ctx.FailComp {
+		return eqAppError{msg: "compensation failed", typ: "CompensationFailed"}
+	}
+	return nil
+}
+
+func eqNewApplicationError(message, typ string, cause error) error {
+	return eqAppError{msg: message + ":" + cause.Error(), typ: typ}
+}
+
+func eqOrderWorkflow(ctx eqWorkflowContext, runner *eqWorkflowRunner, input eqOrderInput) (err error) {
+	var compensations []func(eqWorkflowContext, eqFailureReason) error
+	failedStep := ""
+	reserve := eqReserveResult{ID: ""}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		reason := eqBuildFailureReason(failedStep, err)
+		for i := len(compensations) - 1; i >= 0; i-- {
+			compErr := compensations[i](ctx, reason)
+			if compErr != nil {
+				err = eqNewApplicationError(
+					"workflow failed and compensation failed",
+					"CompensationFailed",
+					compErr,
+				)
+				return
+			}
+		}
+	}()
+
+	failedStep = "step1_reserve"
+	reserve = eqReserve(ctx, input.OrderID)
+	compensations = append(compensations, func(ctx eqWorkflowContext, reason eqFailureReason) error {
+		return eqMarkReserveFailed(ctx, eqMarkFailedInput{
+			OrderID:    input.OrderID,
+			ReserveID:  reserve.ID,
+			FailedBy:   reason.FailedStep,
+			Reason:     reason.Message,
+			ReasonType: reason.Type,
+		})
+	})
+
+	failedStep = "step10_pay"
+	err = runner.Pay(ctx, input.OrderID)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func eqRule(user eqUser, scores []int64, scorer *eqScorer, store *eqStore) eqDecision {
 	normalized := eqNormalize(user)
 	total := int64(0)
@@ -295,6 +415,178 @@ func Rule(user eqUser, booker *eqBooker) policy.eqBookResult {
 	if !reflect.DeepEqual(runtimeBooker.booked, goBooker.booked) {
 		t.Fatalf("booker side effects mismatch\nwant: %#v\ngot:  %#v", goBooker.booked, runtimeBooker.booked)
 	}
+}
+
+func TestTranslatedJSONMatchesClosureCompensationBehavior(t *testing.T) {
+	src := []byte(`package orders
+
+import (
+	temporal "example.com/temporal"
+	workflow "example.com/workflow"
+)
+
+type eqFailureReason struct {
+	FailedStep string
+	Message    string
+	Type       string
+}
+
+type eqOrderInput struct {
+	OrderID string
+}
+
+type eqReserveResult struct {
+	ID string
+}
+
+type eqMarkFailedInput struct {
+	OrderID    string
+	ReserveID  string
+	FailedBy   string
+	Reason     string
+	ReasonType string
+}
+
+func OrderWorkflow(ctx workflow.Context, runner *eqWorkflowRunner, input eqOrderInput) (err error) {
+	var compensations []func(workflow.Context, eqFailureReason) error
+	failedStep := ""
+	reserve := eqReserveResult{ID: ""}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		reason := BuildFailureReason(failedStep, err)
+		for i := len(compensations) - 1; i >= 0; i-- {
+			compErr := compensations[i](ctx, reason)
+			if compErr != nil {
+				err = temporal.NewApplicationError(
+					"workflow failed and compensation failed",
+					"CompensationFailed",
+					compErr,
+				)
+				return
+			}
+		}
+	}()
+
+	failedStep = "step1_reserve"
+	reserve = workflow.Reserve(ctx, input.OrderID)
+	compensations = append(compensations, func(ctx workflow.Context, reason eqFailureReason) error {
+		return workflow.MarkReserveFailed(ctx, eqMarkFailedInput{
+			OrderID:    input.OrderID,
+			ReserveID:  reserve.ID,
+			FailedBy:   reason.FailedStep,
+			Reason:     reason.Message,
+			ReasonType: reason.Type,
+		})
+	})
+
+	failedStep = "step10_pay"
+	err = runner.Pay(ctx, input.OrderID)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+`)
+	jsonProgram, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "OrderWorkflow"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+
+	reg := wflang.DefaultRegistry()
+	if err := reg.BindGoPackage("orders", registry.PackageSpec{
+		Functions: []registry.FuncSpec{
+			{GoName: "BuildFailureReason", Impl: eqBuildFailureReasonValue},
+		},
+	}); err != nil {
+		t.Fatalf("BindGoPackage orders: %v", err)
+	}
+	if err := reg.BindGoPackage("workflow", registry.PackageSpec{
+		Functions: []registry.FuncSpec{
+			{GoName: "Reserve", Impl: eqReserve},
+			{GoName: "MarkReserveFailed", Impl: eqMarkReserveFailed},
+		},
+	}); err != nil {
+		t.Fatalf("BindGoPackage workflow: %v", err)
+	}
+	if err := reg.BindGoPackage("temporal", registry.PackageSpec{
+		Functions: []registry.FuncSpec{
+			{GoName: "NewApplicationError", Impl: eqNewApplicationError},
+		},
+	}); err != nil {
+		t.Fatalf("BindGoPackage temporal: %v", err)
+	}
+	for name, typ := range map[string]reflect.Type{
+		"eqFailureReason":          reflect.TypeFor[eqFailureReason](),
+		"orders.eqReserveResult":   reflect.TypeFor[eqReserveResult](),
+		"orders.eqMarkFailedInput": reflect.TypeFor[eqMarkFailedInput](),
+	} {
+		if err := reg.BindType(name, typ, wflang.BindOptions{}); err != nil {
+			t.Fatalf("BindType %s: %v", name, err)
+		}
+	}
+	if err := reg.AutoBindType((*eqWorkflowRunner)(nil)); err != nil {
+		t.Fatalf("AutoBindType runner: %v", err)
+	}
+
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON(jsonProgram)
+	if err != nil {
+		t.Fatalf("CompileJSON: %v\n%s", err, jsonProgram)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		failPay  bool
+		failComp bool
+	}{
+		{name: "success skips compensation"},
+		{name: "pay failure with compensation success", failPay: true},
+		{name: "pay failure with compensation failure", failPay: true, failComp: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := eqOrderInput{OrderID: "A100"}
+			goLog := []string{}
+			goCtx := eqWorkflowContext{Log: &goLog, FailComp: tc.failComp}
+			goErr := eqOrderWorkflow(goCtx, &eqWorkflowRunner{failPay: tc.failPay}, input)
+
+			runtimeLog := []string{}
+			runtimeCtx := eqWorkflowContext{Log: &runtimeLog, FailComp: tc.failComp}
+			gotV, err := prog.Run(context.Background(), wflang.RunOptions{
+				Vars: map[string]any{
+					"ctx":    types.NewValue("workflow.Context", runtimeCtx),
+					"runner": &eqWorkflowRunner{failPay: tc.failPay},
+					"input":  input,
+				},
+			})
+			if err != nil {
+				t.Fatalf("Run generated JSON: %v\n%s", err, jsonProgram)
+			}
+			var gotErr error
+			if gotV.Go() != nil {
+				var ok bool
+				gotErr, ok = gotV.Go().(error)
+				if !ok {
+					t.Fatalf("result carrier = %T, want error or nil", gotV.Go())
+				}
+			}
+			if errorMessage(goErr) != errorMessage(gotErr) {
+				t.Fatalf("error mismatch\nwant: %s\ngot:  %s", errorMessage(goErr), errorMessage(gotErr))
+			}
+			if !reflect.DeepEqual(runtimeLog, goLog) {
+				t.Fatalf("side effects mismatch\nwant: %#v\ngot:  %#v", goLog, runtimeLog)
+			}
+		})
+	}
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func mustInt64Array(t *testing.T, values []int64) types.Value {

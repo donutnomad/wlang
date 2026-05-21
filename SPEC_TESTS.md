@@ -13,11 +13,11 @@
 
 ## §1 定位
 
-### TC-001 语言不允许定义 function
+### TC-001 可调用能力入口
 - Spec: §1.1
-- Given: 任意包含 `{"function": ...}` / `{"def": ...}` / `{"lambda": ...}` 的 JSON 程序
+- Given: 包含宿主调用、函数值 `{"fn": ...}`、函数值调用 `{"call": ...}` 的 JSON 程序
 - When: `engine.CompileJSON(data)`
-- Then: 返回 `E_AST_SHAPE` 或 `E_SYMBOL`，message 指出语言不支持用户函数定义
+- Then: 宿主调用按 Registry 解析；函数值和函数值调用按语言内核解析；旧形态 `{"function": ...}` / `{"def": ...}` 返回 `E_AST_SHAPE` 或 `E_SYMBOL`
 
 ### TC-002 所有可调用能力来自 Registry
 - Spec: §1.1
@@ -215,11 +215,11 @@
 - When: 各自最小程序
 - Then: 全部通过
 
-### TC-072 规划中语句的占位
+### TC-072 已实现控制流语句
 - Spec: §2.4
-- Given: `fori / break / continue / panic / routine` 任一
-- When: 编译当前未实现版本
-- Then: 返回 `E_SYMBOL` 或对应"规划中"诊断；实现后转入 §3.3 系列 TC
+- Given: `fori / break / continue / panic / routine / defer / select / match` 任一最小程序
+- When: 编译并执行
+- Then: 按各自语义通过，非法形态返回对应诊断
 
 ---
 
@@ -299,15 +299,15 @@
 
 ### TC-092 Go error 自动暴露 Error 方法
 - Spec: §2.5
-- Given: `try` 捕获到 `error` typed value
+- Given: `func Fail() error` 返回非 nil error
 - When: `{"Error":[{"var":"err"}]}`
 - Then: string=err.Error()
 
-### TC-093 前台调用 host error 按普通 error 处理
+### TC-093 前台调用 host error 返回为值
 - Spec: §2.5 / §5.3
-- Given: 前台宿主调用返回 Go error
+- Given: 前台宿主调用返回 `(T,error)` 且 error 非 nil
 - When: 执行
-- Then: 走默认错误短路
+- Then: 返回 `tuple<T,error>`，末位为原始 Go error
 
 ---
 
@@ -344,7 +344,7 @@
 - Then: typed value 类型名=`null`，Go=nil
 
 ### TC-105 typed literal value 类型/格式错误
-- Spec: §2.5.1 / §14.1
+- Spec: §2.5.1 / §14
 - Given: `{"literal":{"type":"int64","value":"abc"}}`
 - When: 编译或加载
 - Then: 立即报错（编译期/加载期），不延迟到运行期
@@ -599,29 +599,29 @@
 - When: 执行
 - Then: 调用产生副作用；不写入任何变量；不影响作用域
 
-### TC-206 expr 内部错误按短路冒泡
-- Spec: §3.3 / §9.1.1
-- Given: `expr` 内宿主调用返回 error
+### TC-206 expr 丢弃 host error 返回值
+- Spec: §3.3 / §9.1
+- Given: `expr` 内宿主调用返回 `error` 或 `(T,error)`
 - When: 执行
-- Then: 中止当前语句并向外冒泡
+- Then: host call 被执行，typed 返回值被丢弃；`LangError` 仍中断执行
 
-### TC-207 routine 必须包单个宿主调用
+### TC-207 routine 支持 do block
 - Spec: §3.3 routine
-- Given: `{"routine":{"do":[...]}}` 或 `{"routine":[stmt1,stmt2]}`
-- When: 编译
-- Then: `E_AST_SHAPE`
+- Given: `{"routine":{"do":[{"return":...}]}}`
+- When: 执行
+- Then: 返回 `routineHandle`，await 后得到 body 的返回值
 
-### TC-208 routine 单调用立即返回 null
+### TC-208 routine 单调用立即返回 handle
 - Spec: §3.3
 - Given: `{"routine":{"Publish":[{"pkg":"events"},{"var":"input.event"}]}}`
 - When: 执行
-- Then: 当前线程立即得到 null typed value；后台 goroutine 已启动
+- Then: 当前线程立即得到 `routineHandle`；后台 goroutine 已启动
 
-### TC-209 routine error 进入 RoutineErrorHandler
-- Spec: §3.3 / §9.1.1
+### TC-209 routine LangError 进入 RoutineErrorHandler
+- Spec: §3.3 / §9.1
 - Given: 注册 `RoutineErrorHandler`
-- When: routine 内宿主调用返回 error
-- Then: handler 收到该 error；不冒泡到主流程
+- When: routine 内产生 `LangError`
+- Then: handler 收到该 error；主流程继续
 
 ### TC-210 routine await 获取返回值
 - Spec: §3.3
@@ -749,19 +749,19 @@
 - Spec: §4.2.3
 - Given: `(R, error)`
 - When: 调用成功
-- Then: result 为 R typed value
+- Then: result 为 `tuple<R,error>`，末位 error Go 承载值为 nil
 
 ### TC-321 多业务返回值 → tuple
 - Spec: §4.2.3
 - Given: `(*Book, int64, bool, string, error)`
 - When: 调用成功
-- Then: result 类型 = `tuple<*github.com/acme/books.Book,int64,boolean,string>`
+- Then: result 类型 = `tuple<*github.com/acme/books.Book,int64,boolean,string,error>`
 
 ### TC-322 仅 error 返回
 - Spec: §4.2.3
 - Given: `func F() error`，error=nil
 - When: 调用
-- Then: result 为 null typed value
+- Then: result 为 `error` typed value，Go 承载值为 nil
 
 ### TC-323 业务返回值未注册类型 → 自动类型名
 - Spec: §4.2.3
@@ -769,11 +769,11 @@
 - When: 调用返回
 - Then: result 类型名按 §4.2.2 自动生成
 
-### TC-324 error != nil 默认中断
-- Spec: §4.2.3 / §9.1.1
-- Given: 默认模式
-- When: 函数返回 error
-- Then: 走错误短路
+### TC-324 error 非 nil 进入 tuple
+- Spec: §4.2.3 / §9.1
+- Given: `func F() (int64,error)` 返回非 nil error
+- When: 调用
+- Then: result 为 `tuple<int64,error>`，末位保存该 error
 
 ---
 
@@ -897,21 +897,21 @@
 
 ### TC-405 await 多业务返回值 → tuple
 - Spec: §5.2
-- Given: routine 返回 [A,B]
+- Given: routine 返回 `(A,B,error)`
 - When: await handle
-- Then: 返回 tuple<A,B>
+- Then: 返回 `tuple<A,B,error>`
 
 ### TC-406 await 仅 error 返回的成功路径
 - Spec: §5.2
 - Given: routine 函数仅返回 error 且 error=nil
 - When: await handle
-- Then: 返回 null typed value
+- Then: 返回 `error` typed value，Go 承载值为 nil
 
 ### TC-407 await routine error
 - Spec: §5.2
-- Given: routine 函数返回 Go error
+- Given: routine 函数返回 `(T,error)` 且 error 非 nil
 - When: await handle
-- Then: await 按普通错误路径返回
+- Then: await 返回 `tuple<T,error>`，末位保存该 error
 
 ---
 
@@ -975,14 +975,14 @@
 - When: routine 内多次调用
 - Then: 所有调用 ctx 派生自 A（cancel 联动）
 
-### TC-444 短路不回滚副作用
-- Spec: §5.5 / §9.1.1
+### TC-444 LangError 不回滚已完成副作用
+- Spec: §5.5 / §9.1
 - Given: 已完成的 Go 调用产生外部副作用，后续语句报错
-- When: error 冒泡
-- Then: 已完成调用不被自动回滚；事务回滚由宿主 Run 返回后决定
+- When: 后续语句产生 `LangError`
+- Then: 已完成调用保留；事务回滚由宿主根据 Run 结果决定
 
 ### TC-445 context cancel 中断执行
-- Spec: §5.5 / §15.3
+- Spec: §5.5 / §10.1
 - Given: ctx 被宿主 cancel
 - When: Run 进行中
 - Then: 在下一次检查点（语句 / 调用边界）中止；返回 `context.Canceled` 或 `E_RUNTIME`
@@ -1131,11 +1131,11 @@
 - When: 求值
 - Then: 行为与说明一致；Assert 失败触发诊断错误
 
-### TC-570 不支持匿名函数 / lambda
-- Spec: §6.2 末尾
-- Given: 任意尝试声明 lambda 的 JSON
-- When: 编译
-- Then: `E_AST_SHAPE`
+### TC-570 函数值 / 闭包 / dynamic call
+- Spec: §3.3 函数值
+- Given: `{"fn":{"params":[["x","int64"]],"returns":["int64"],"do":[...]}}` 被保存到变量、数组或 defer 中
+- When: 通过 `{"call":{"fn":...,"args":[...]}}` 调用
+- Then: 参数数量和类型必须匹配；闭包按引用捕获外层变量；返回值类型必须匹配 `returns`
 
 ---
 
@@ -1362,25 +1362,25 @@
 - Then: 返回同一结果
 
 ### TC-705 await 单业务返回值
-- Spec: §8.3
+- Spec: §8.2
 - Given: routine 返回 T
 - When: await
 - Then: 返回单 typed value
 
 ### TC-706 await 多业务返回值 → tuple
-- Spec: §8.3
-- Given: routine 返回 A,B
+- Spec: §8.2
+- Given: routine 返回 `(A,B,error)`
 - When: await
-- Then: 注入 tuple<A,B>
+- Then: 注入 `tuple<A,B,error>`
 
-### TC-707 await routine Err
-- Spec: §8.3
-- Given: routine 返回 error
+### TC-707 await routine error value
+- Spec: §8.2
+- Given: routine 返回 `(T,error)` 且 error 非 nil
 - When: await
-- Then: await 返回错误
+- Then: await 返回 `tuple<T,error>`，末位保存该 error
 
 ### TC-708 自动宿主类型返回
-- Spec: §8.3
+- Spec: §8.2
 - Given: routine 返回未注册 Go 类型
 - When: await
 - Then: 按 §4.2.2 自动生成类型名
@@ -1389,53 +1389,53 @@
 
 ## §9 错误模型
 
-### TC-720 error == nil 表达式得到 T
+### TC-720 (T, nil) 表达式得到 tuple
 - Spec: §9.1
 - Given: 函数返回 (T, nil)
 - When: 求值
-- Then: typed value T
+- Then: typed value `tuple<T,error>`，末位 error Go 承载值为 nil
 
-### TC-721 error != nil 默认中断
+### TC-721 (zero, err) 返回 tuple 末位 error
 - Spec: §9.1
 - Given: 函数返回 (zero, err)
 - When: 求值
-- Then: 错误短路
+- Then: typed value `tuple<T,error>`，末位保存 err
 
-### TC-722 try 启用后 error 转 typed value
+### TC-722 error 值可显式解构后调用 Error
 - Spec: §9.1
-- Given: try 包裹该调用
-- When: 求值
-- Then: 得到 typed value，类型=error；可调用 Error 方法
+- Given: `let [v, err] = F()`
+- When: `{"Error":[{"var":"err"}]}`
+- Then: 返回 err.Error()
 
-### TC-723 错误冒泡 6 步链
-- Spec: §9.1.1
-- Given: foreach.do 内宿主调用 error
+### TC-723 LangError 中断当前执行路径
+- Spec: §9.1 / §9.2
+- Given: foreach.do 内表达式产生 `E_TYPE`
 - When: 执行
-- Then: 中断当前调用 → 中断当前语句 → 中断 foreach 剩余迭代 → 冒泡到顶层（无 try 时）→ Run 返回该 error
+- Then: 当前循环与后续语句停止，Run 返回该 `LangError`
 
-### TC-724 try 捕获停止冒泡
-- Spec: §9.1.1
-- Given: 外层 try 包含失败语句
+### TC-724 host panic 转 LangError
+- Spec: §9.1 / §9.2
+- Given: 宿主函数 panic
+- When: 调用
+- Then: Run 返回 `E_PANIC`
+
+### TC-725 routine host error 保留在 handle 值中
+- Spec: §9.1 / §8
+- Given: routine 内宿主调用返回 `(T,error)` 且 error 非 nil
 - When: 执行
-- Then: error 转 typed value 进入 catch；冒泡停止
+- Then: 主流程继续；await 返回 `tuple<T,error>`
 
-### TC-725 routine error 不冒泡到主流程
-- Spec: §9.1.1
-- Given: routine 内宿主调用失败
-- When: 执行
-- Then: 进入 RoutineErrorHandler；主流程继续
-
-### TC-726 副作用不会自动回滚
-- Spec: §9.1.1
+### TC-726 LangError 不自动回滚副作用
+- Spec: §9.1
 - Given: 已完成的写入
-- When: 之后语句报错并冒泡到 Run 返回
-- Then: 已完成写入仍存在，由宿主基于 ctx.Tx 决定回滚
+- When: 之后语句产生 `LangError`
+- Then: 已完成写入仍存在，由宿主基于 ctx.Tx 决定提交或回滚
 
 ### TC-727 error 与 null 严格区分
-- Spec: §9.1.1
-- Given: 函数 (T, error)：error=nil 且 T=null vs error=非空
+- Spec: §9.1
+- Given: `func() error` 返回 nil 与 `func() *T` 返回 nil
 - When: 求值
-- Then: 前者得 null typed value；后者走错误短路，绝不返回 error typed value（除非 try）
+- Then: 前者是 type=`error` 且 Go 承载值 nil；后者是 type=`null`
 
 ### TC-728 null receiver 运行期检查
 - Spec: §9.1.2
@@ -1443,11 +1443,11 @@
 - When: 调用方法
 - Then: 不进入反射；返回 `E_NIL_RECEIVER`
 
-### TC-729 E_NIL_RECEIVER 可被 try 捕获
+### TC-729 E_NIL_RECEIVER 中断执行
 - Spec: §9.1.2
-- Given: 包在 try 内
+- Given: 方法 receiver 求值为 null
 - When: 调用 null receiver
-- Then: 走 catch，得到 error typed value
+- Then: Run 返回 `E_NIL_RECEIVER`
 
 ### TC-730 LangError 字段完备
 - Spec: §9.2
@@ -1462,7 +1462,7 @@
 - Then: 错误码命中：`E_JSON_DECODE/E_AST_SHAPE/E_SYMBOL/E_TYPE/E_CAPABILITY/E_RUNTIME/E_BUDGET/E_HOST/E_NIL_RECEIVER/E_PANIC/E_ROUTINE`
 
 ### TC-732 多错误聚合
-- Spec: §9.4 / §15.2
+- Spec: §9.4 / §14
 - Given: 程序含多处编译错误
 - When: CompileJSON
 - Then: 一次性返回多 LangError 集合
@@ -1677,167 +1677,143 @@
 
 ---
 
-## §14 改善项验收
+## §14 维护清单验收
 
 ### TC-900 null 独立类型
-- Spec: §14.1
+- Spec: §14
 - Given: 任意 null typed value
 - When: TypeOf
 - Then: 返回 `null`，与 `any` / `error` 区分
 
 ### TC-901 参数数量严格校验
-- Spec: §14.1
+- Spec: §14
 - Given: 多/少参数
 - When: 编译
 - Then: `E1004`
 
 ### TC-902 反射调用安全检查
-- Spec: §14.1
+- Spec: §14
 - Given: 类型错配
 - When: 运行前
 - Then: 转 `E_TYPE`，不调用 Go
 
 ### TC-903 typed literal 构造错误直返
-- Spec: §14.1
+- Spec: §14
 - Given: bigInt value="abc"
 - When: 加载
 - Then: 立即报错
 
 ### TC-904 array<T> 元素类型校验
-- Spec: §14.1
+- Spec: §14
 - Given: array<int64> 含 string 元素
 - When: 编译
 - Then: `E_TYPE`
 
 ### TC-905 match 表达式
-- Spec: §14.2
+- Spec: §14
 - Given: match 多分支值匹配
 - When: 编译/运行
 - Then: 命中分支求值；缺省分支兜底；类型合并规则一致
 
 ### TC-906 编译后 Program 复用
-- Spec: §14.3
+- Spec: §14
 - Given: program 多次 Run
 - When: 多次执行
 - Then: 不重复 Decode/Resolve；性能基准明显高于一次性 Compile+Run
 
 ### TC-907 typed AST 执行一致性
-- Spec: §14.3 / §15.2
+- Spec: §14
 - Given: typed AST vs 动态执行
 - When: 同输入
 - Then: 结果一致
 
 ### TC-908 顶级注入：变量+包
-- Spec: §14.3
+- Spec: §14
 - Given: SessionOptions 同时注入 Vars 与 Packages
 - When: AppendRun
 - Then: 两者均可用
 
 ### TC-909 Go 桥接：context cancel
-- Spec: §14.4
+- Spec: §14
 - Given: ctx 注入并 cancel
 - When: Run
 - Then: 中断
 
 ### TC-910 注册错误聚合
-- Spec: §14.4
+- Spec: §14
 - Given: 多个无效注册
 - When: 启动期
 - Then: 一次性返回所有错误
 
 ### TC-911 静态分析：let 类型传播
-- Spec: §14.5
+- Spec: §14
 - Given: `let x = call ...`
 - When: 后续使用 x
 - Then: x 的静态类型被推断为 call 返回类型
 
 ### TC-912 set 类型检查
-- Spec: §14.5
+- Spec: §14
 - Given: 类型不匹配赋值
 - When: 编译
 - Then: `E_TYPE`
 
 ### TC-913 条件布尔检查
-- Spec: §14.5
+- Spec: §14
 - Given: cond 非布尔
 - When: 编译
 - Then: `E_TYPE`
 
 ### TC-914 分支返回类型合并
-- Spec: §14.5
+- Spec: §14
 - Given: if 两分支返回类型不同
 - When: 编译
 - Then: 按合并规则得到联合类型或 `E_TYPE`
 
 ### TC-915 JSON Pointer 错误路径
-- Spec: §14.5 / §9.4
+- Spec: §14 / §9.4
 - Given: 任一编译错误
 - When: 报错
 - Then: Path 是 JSON Pointer，可定位到原始 JSON 节点
 
 ---
 
-## §15 路线图阶段验收
+## §15 演进原则验收
 
-### TC-950 阶段一：单引入即可运行
-- Spec: §15.1 验收
-- Given: 仅 import wflang package
-- When: 编译执行 §16 示例
-- Then: 全通过
+### TC-950 语法变更同步文档与测试
+- Spec: §15
+- Given: 新增或调整 AST 语法
+- When: 提交实现
+- Then: parser、runtime、LANGUAGE、SPEC_TESTS 均有对应更新
 
-### TC-951 阶段一：诊断错误三件套
-- Spec: §15.1
-- Given: 任一错误
-- When: 输出
-- Then: 含 path/code/message
+### TC-951 breaking 语义变更有迁移路径
+- Spec: §15
+- Given: 返回形态、控制流或类型系统语义变更
+- When: 合入
+- Then: 提供版本门控或迁移说明
 
-### TC-952 阶段二：类型错误编译期返回
-- Spec: §15.2
-- Given: 各类类型错配
-- When: Compile
-- Then: 全部在编译期暴露
+### TC-952 host error 保持值语义
+- Spec: §15
+- Given: host call 返回 Go error
+- When: 执行
+- Then: Go error 进入 `error` typed value 或 tuple slot
 
-### TC-953 阶段二：Explain 列出元数据
-- Spec: §15.2
-- Given: 任一程序
-- When: Explain()
-- Then: 列出变量/函数/能力/返回类型
+### TC-953 LangError 保持诊断语义
+- Spec: §15
+- Given: 解析、类型、权限、预算、panic、nil receiver 错误
+- When: 执行
+- Then: 返回 `LangError`，含 code/path/message
 
-### TC-954 阶段三：Builder→Compile 闭环
-- Spec: §15.3
-- Given: Builder 输出
-- When: CompileJSON
-- Then: 通过
+### TC-954 DefaultRegistry 只暴露稳定纯函数
+- Spec: §15
+- Given: 新增标准库函数
+- When: 加入 `DefaultRegistry`
+- Then: 具备确定性语义和测试覆盖
 
-### TC-955 阶段三：缺 capability 在执行前报告
-- Spec: §15.3
-- Given: 程序需 cap，未授予
-- When: Compile / Capability check
-- Then: 报告
-
-### TC-956 阶段四：常见数据转换免新增宿主函数
-- Spec: §15.4
-- Given: 常见 JSON 转换需求
-- When: 仅用 stdlib
-- Then: 完成
-
-### TC-957 阶段五：format/lint/test/explain 全可用
-- Spec: §15.5
-- Given: 任一程序
-- When: 工具链
-- Then: 全部可执行无崩溃
-
-### TC-958 阶段五：conformance 通过
-- Spec: §15.5
-- Given: 当前实现
-- When: 跑 conformance suite
-- Then: 全通过
-
-### TC-959 阶段五：基准性能
-- Spec: §15.5
-- Given: benchmark suite
-- When: 跑 bench
-- Then: 输出基准数据，建立回归基线
+### TC-955 go2wlang 受限子集明确报错
+- Spec: §15
+- Given: Go 源码含不支持语法
+- When: 调用 go2wlang API 或 CLI
+- Then: 返回明确的不支持错误，包含位置和语法类别
 
 ---
 
@@ -1913,7 +1889,7 @@
 - Spec: §16.10
 - Given: routine 启动 events.Publish
 - When: Run
-- Then: 主流程立即返回 null；后台执行 Publish
+- Then: 主流程立即返回 `routineHandle`；后台执行 Publish
 
 ### TC-992 §16.11 包函数 risk.Score
 - Spec: §16.11

@@ -21,11 +21,21 @@ type varBinding struct {
 // deferredCall captures a host call with its receiver/arguments snapshot, to
 // be executed in LIFO order when the enclosing scope unwinds (LANGUAGE.md §3.7).
 type deferredCall struct {
-	op   string
-	recv types.Value
-	args []types.Value
-	path string
+	op     string
+	recv   types.Value
+	args   []types.Value
+	fn     types.Value
+	fnArgs []types.Value
+	path   string
+	kind   deferredCallKind
 }
+
+type deferredCallKind int
+
+const (
+	deferredHostCall deferredCallKind = iota
+	deferredFuncCall
+)
 
 // Scope is a single lexical scope frame (§2.3).
 type Scope struct {
@@ -42,7 +52,16 @@ func (s *Scope) Push() *Scope { return &Scope{parent: s, vars: map[string]*varBi
 
 // PushDeferred records a deferred host call on this scope frame.
 func (s *Scope) PushDeferred(op string, recv types.Value, args []types.Value, path string) {
-	s.deferred = append(s.deferred, deferredCall{op: op, recv: recv, args: args, path: path})
+	s.deferred = append(s.deferred, deferredCall{
+		op: op, recv: recv, args: args, path: path, kind: deferredHostCall,
+	})
+}
+
+// PushDeferredFunc records a deferred function call on this scope frame.
+func (s *Scope) PushDeferredFunc(fn types.Value, args []types.Value, path string) {
+	s.deferred = append(s.deferred, deferredCall{
+		fn: fn, fnArgs: args, path: path, kind: deferredFuncCall,
+	})
 }
 
 // PopDeferred returns the deferred calls slice in LIFO order and clears it.

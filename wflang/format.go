@@ -134,7 +134,11 @@ func (f *pseudoFormatter) stmt(n ast.Node, indent int) {
 	case *ast.Set:
 		f.line(indent, fmt.Sprintf("%s = %s", x.Name, f.expr(x.Expr)))
 	case *ast.Return:
-		f.line(indent, "return "+f.expr(x.Expr))
+		if x.Named != "" {
+			f.line(indent, "return named "+x.Named)
+		} else {
+			f.line(indent, "return "+f.expr(x.Expr))
+		}
 	case *ast.IfStmt:
 		f.ifStmt(x, indent)
 	case *ast.Foreach:
@@ -165,7 +169,7 @@ func (f *pseudoFormatter) stmt(n ast.Node, indent int) {
 	case *ast.Routine:
 		f.line(indent, f.expr(x))
 	case *ast.Defer:
-		f.line(indent, "defer "+f.callExpr(x.Call))
+		f.line(indent, "defer "+f.expr(x.Expr))
 	case *ast.SelectStmt:
 		f.selectStmt(x, indent)
 	default:
@@ -264,6 +268,27 @@ func (f *pseudoFormatter) expr(n ast.Node) string {
 			items[i] = f.expr(it)
 		}
 		return fmt.Sprintf("array<%s>[%s]", x.Elem, strings.Join(items, ", "))
+	case *ast.FuncLit:
+		params := make([]string, len(x.Params))
+		for i, p := range x.Params {
+			params[i] = p.Name + ": " + p.Type
+		}
+		ret := ""
+		if len(x.Returns) > 0 {
+			ret = " -> " + strings.Join(x.Returns, ", ")
+		}
+		var b strings.Builder
+		b.WriteString("fn(" + strings.Join(params, ", ") + ")" + ret + " {")
+		if len(x.Body) > 0 {
+			b.WriteByte('\n')
+			nested := pseudoFormatter{}
+			nested.blockLines(x.Body, 1)
+			b.WriteString(nested.buf.String())
+		}
+		b.WriteString("}")
+		return b.String()
+	case *ast.FuncCall:
+		return "call " + f.expr(x.Fn) + "(" + f.exprList(x.Args) + ")"
 	case *ast.MapLit:
 		return f.mapExpr(x)
 	case *ast.StructLit:
@@ -312,7 +337,7 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 	if isPrefixOp(c.Op) && len(c.Args) == 1 {
 		return c.Op + f.expr(c.Args[0])
 	}
-	if (c.Op == "await" || strings.HasPrefix(c.Op, "m.") || strings.HasPrefix(c.Op, "ch.")) && len(c.Args) > 0 {
+	if (c.Op == "await" || strings.HasPrefix(c.Op, "m.") || strings.HasPrefix(c.Op, "ch.") || strings.HasPrefix(c.Op, "arr.")) && len(c.Args) > 0 {
 		return c.Op + "(" + f.exprList(c.Args) + ")"
 	}
 	if len(c.Args) > 0 {

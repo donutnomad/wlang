@@ -41,7 +41,11 @@ const (
 
 // errReturnSig / errBreakSig / errContinueSig implement control flow via errors
 // so cross-function unwinding is trivial. Exec unwraps them.
-type errReturnSig struct{ v types.Value }
+type errReturnSig struct {
+	v     types.Value
+	named string
+	path  string
+}
 
 func (errReturnSig) Error() string { return "__signal:return" }
 
@@ -250,11 +254,14 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 		}
 		return v, sigNone, nil
 	case *ast.Return:
+		if x.Named != "" {
+			return types.Value{}, sigReturn, errReturnSig{named: x.Named, path: x.Path()}
+		}
 		v, err := e.Eval(x.Expr)
 		if err != nil {
 			return types.Value{}, sigNone, err
 		}
-		return v, sigReturn, errReturnSig{v: v}
+		return v, sigReturn, errReturnSig{v: v, path: x.Path()}
 	case *ast.IfStmt:
 		cond, err := e.Eval(x.Cond)
 		if err != nil {
@@ -321,19 +328,34 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 // records them on the current scope. The actual invocation happens when the
 // enclosing block scope exits (LANGUAGE.md §3.7).
 func (e *Executor) execDefer(x *ast.Defer) (types.Value, Signal, error) {
-	if x.Call == nil {
+	if x.Expr == nil && x.Call != nil {
+		x.Expr = x.Call
+	}
+	if x.Expr == nil {
 		return types.Value{}, sigNone, werr.New(werr.CodeASTShape,
-			"defer requires a host call").WithPath(x.Path())
+			"defer requires a call").WithPath(x.Path())
 	}
-	if _, isBuiltin := builtinOps[x.Call.Op]; isBuiltin {
+	switch call := x.Expr.(type) {
+	case *ast.Call:
+		if _, isBuiltin := builtinOps[call.Op]; isBuiltin {
+			return types.Value{}, sigNone, werr.Newf(werr.CodeASTShape,
+				"defer body must be a host call, got builtin %q", call.Op).WithPath(x.Path())
+		}
+		prepared, err := e.prepareHostCall(call)
+		if err != nil {
+			return types.Value{}, sigNone, err
+		}
+		e.scope.PushDeferred(prepared.op, prepared.recv, prepared.args, prepared.path)
+	case *ast.FuncCall:
+		prepared, err := e.prepareFuncCall(call)
+		if err != nil {
+			return types.Value{}, sigNone, err
+		}
+		e.scope.PushDeferredFunc(prepared.fn, prepared.args, prepared.path)
+	default:
 		return types.Value{}, sigNone, werr.Newf(werr.CodeASTShape,
-			"defer body must be a host call, got builtin %q", x.Call.Op).WithPath(x.Path())
+			"defer requires a call expression, got %T", x.Expr).WithPath(x.Path())
 	}
-	prepared, err := e.prepareHostCall(x.Call)
-	if err != nil {
-		return types.Value{}, sigNone, err
-	}
-	e.scope.PushDeferred(prepared.op, prepared.recv, prepared.args, prepared.path)
 	nullV, _ := types.NewNull()
 	return nullV, sigNone, nil
 }
@@ -349,12 +371,33 @@ func (e *Executor) runDeferred(s *Scope) error {
 	calls := s.PopDeferred()
 	var firstErr error
 	for _, d := range calls {
-		_, err := e.registry.Invoke(e.ctx, d.op, d.recv, d.args, d.path)
+		var err error
+		switch d.kind {
+		case deferredHostCall:
+			_, err = e.registry.Invoke(e.ctx, d.op, d.recv, d.args, d.path)
+		case deferredFuncCall:
+			_, err = e.invokePreparedFuncCall(preparedFuncCall{
+				fn: d.fn, args: d.fnArgs, path: d.path,
+			})
+		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+func (e *Executor) resolveNamedReturn(s *Scope, rs errReturnSig) (errReturnSig, error) {
+	if rs.named == "" {
+		return rs, nil
+	}
+	v, ok := s.LookupPath(rs.named)
+	if !ok {
+		return rs, werr.Newf(werr.CodeSymbol,
+			"named return variable %q not found", rs.named).WithPath(rs.path)
+	}
+	rs.v = v
+	return rs, nil
 }
 
 // execBlock runs a sequence of statements within a new scope. Deferred calls
@@ -368,8 +411,17 @@ func (e *Executor) execBlock(stmts []ast.Node) (types.Value, Signal, error) {
 	last, _ = types.NewNull()
 	cleanup := func(v types.Value, sig Signal, err error) (types.Value, Signal, error) {
 		defErr := e.runDeferred(blockScope)
+		if rs, ok := err.(errReturnSig); ok && rs.named != "" {
+			resolved, rerr := e.resolveNamedReturn(blockScope, rs)
+			if rerr != nil {
+				err = rerr
+			} else {
+				err = resolved
+				v = resolved.v
+			}
+		}
 		e.scope = blockScope.Pop()
-		if err == nil && defErr != nil {
+		if defErr != nil && (err == nil || isControlSignalErr(err)) {
 			return v, sigNone, defErr
 		}
 		return v, sig, err
@@ -385,6 +437,15 @@ func (e *Executor) execBlock(stmts []ast.Node) (types.Value, Signal, error) {
 		last = v
 	}
 	return cleanup(last, sigNone, nil)
+}
+
+func isControlSignalErr(err error) bool {
+	switch err.(type) {
+	case errReturnSig, errBreakSig, errContinueSig:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
@@ -727,6 +788,10 @@ func containsReturn(n ast.Node) bool {
 		return containsReturn(x.Expr)
 	case *ast.Call:
 		return containsReturnList(x.Args)
+	case *ast.FuncCall:
+		return containsReturn(x.Fn) || containsReturnList(x.Args)
+	case *ast.FuncLit:
+		return false
 	case *ast.Array:
 		return containsReturnList(x.Items)
 	case *ast.MapLit:
@@ -753,9 +818,7 @@ func containsReturn(n ast.Node) bool {
 			return containsReturn(x.Call)
 		}
 	case *ast.Defer:
-		if x.Call != nil {
-			return containsReturn(x.Call)
-		}
+		return containsReturn(x.Expr)
 	}
 	return false
 }
@@ -776,13 +839,27 @@ func (e *Executor) RunProgram(p *ast.Program) (types.Value, error) {
 		}
 		return v, err
 	}
+	finishReturn := func(rs errReturnSig) (types.Value, error) {
+		defErr := e.runDeferred(topScope)
+		if rs.named != "" {
+			resolved, err := e.resolveNamedReturn(topScope, rs)
+			if err != nil {
+				return types.Value{}, err
+			}
+			rs = resolved
+		}
+		if defErr != nil {
+			return rs.v, defErr
+		}
+		return rs.v, nil
+	}
 	var last types.Value
 	last, _ = types.NewNull()
 	for _, s := range p.Body {
 		v, sig, err := e.Exec(s)
 		if err != nil {
 			if rs, ok := err.(errReturnSig); ok {
-				return finish(rs.v, nil)
+				return finishReturn(rs)
 			}
 			if _, ok := err.(errBreakSig); ok {
 				return finish(types.Value{}, werr.New(werr.CodeInvalidControlFlow,
@@ -795,7 +872,7 @@ func (e *Executor) RunProgram(p *ast.Program) (types.Value, error) {
 			return finish(types.Value{}, err)
 		}
 		if sig == sigReturn {
-			return finish(v, nil)
+			return finishReturn(errReturnSig{v: v})
 		}
 		last = v
 	}
