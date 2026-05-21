@@ -1,290 +1,311 @@
-# wflang
+# wlang
 
-## routine 与 await 用法
+`wlang` is a Go-hosted JSON programming runtime. It lets you store executable logic as JSON, validate it with a typed compiler, and run it against a controlled set of Go functions, methods, values, and resource limits.
 
-`routine` 用于启动一个宿主调用并立即返回 `routineHandle`。`await` 用于等待一个或多个 `routineHandle` 完成并读取结果。
+The Go module path is:
 
-### 1. fire-and-forget
+```bash
+go get github.com/donutnomad/wlang
+```
 
-适合后台提交任务，主流程立即继续执行。
+The language envelope is versioned as `wflang/v1`. The public Go package is `github.com/donutnomad/wlang/wflang`.
+
+## Why wlang
+
+wlang is useful when business logic needs to be stored, audited, generated, migrated, or edited outside the main Go binary while still running inside a Go-controlled security boundary.
+
+Typical use cases:
+
+- rule evaluation and policy checks
+- workflow orchestration over registered Go host functions
+- JSON-backed automation scripts
+- business DSL compilation targets
+- safe user-editable logic with budgets and capabilities
+- Go-to-JSON migration for a supported Go subset through `go2wlang`
+
+## Highlights
+
+- **JSON as AST**: programs are plain JSON, easy to persist, diff, audit, and transport.
+- **Go as host**: domain behavior stays in Go packages, methods, and registered types.
+- **Typed execution**: literals, arrays, maps, structs, tuples, channels, function values, and host signatures are validated.
+- **Explicit error model**: Go `error` returns become ordinary `error` values or tuple slots; panic, context cancellation, and budget exhaustion remain runtime failures.
+- **Control flow**: `if`, `match`, `foreach`, `fori`, `break`, `continue`, `return`, `defer`, `routine`, `await`, and `select`.
+- **Closures and deferred calls**: function values capture lexical variables by shared cell semantics and can be stored, called, and deferred.
+- **Tooling**: `wlfmt` formats JSON into stable JSON or pseudocode; `go2wl` translates a supported Go subset into executable wlang JSON.
+
+## Quick Start
+
+Install the library:
+
+```bash
+go get github.com/donutnomad/wlang
+```
+
+Embed the runtime in Go:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/donutnomad/wlang/wflang"
+)
+
+func strlen(s string) (int64, error) {
+	return int64(len(s)), nil
+}
+
+func main() {
+	reg := wflang.DefaultRegistry()
+	err := reg.BindGoPackage("strx", wflang.PackageSpec{
+		Functions: []wflang.FuncSpec{
+			{GoName: "Len", Impl: strlen},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	engine := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+
+	programJSON := []byte(`[
+	  {"return":{"Len":[
+	    {"pkg":"strx"},
+	    {"literal":{"type":"string","value":"hello"}}
+	  ]}}
+	]`)
+
+	program, err := engine.CompileJSON(programJSON)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	value, err := program.Run(context.Background(), wflang.RunOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(value.Go())
+}
+```
+
+Output:
+
+```text
+5
+```
+
+## JSON Program Shape
+
+A program can be a bare statement array:
 
 ```json
 [
   {
-    "routine": {
-      "Publish": [
-        { "pkg": "events" },
-        { "var": "event" }
+    "let": {
+      "name": { "literal": { "type": "string", "value": "alice" } }
+    }
+  },
+  {
+    "return": {
+      "+": [
+        { "literal": { "type": "string", "value": "hello " } },
+        { "var": "name" }
       ]
     }
-  },
-  {
-    "return": {
-      "literal": { "type": "string", "value": "submitted" }
-    }
   }
 ]
 ```
 
-后台调用失败时，错误进入宿主侧 `RoutineErrorHandler`。
-
-### 2. 单个 handle + await
+It can also use an envelope:
 
 ```json
-[
-  {
-    "let": {
-      "h": {
-        "routine": {
-          "Fetch": [
-            { "pkg": "books" },
-            { "var": "id" }
-          ]
-        }
-      }
-    }
-  },
-  {
-    "return": {
-      "await": { "var": "h" }
-    }
-  }
-]
+{
+  "lang": "wflang/v1",
+  "imports": ["str", "arr", "m"],
+  "program": [
+    { "return": { "literal": { "type": "boolean", "value": true } } }
+  ]
+}
 ```
 
-`await` 返回 `Fetch` 的业务返回值。
+See [examples/full_feature_demo.json](examples/full_feature_demo.json) for a broad syntax tour.
 
-### 3. 等待多个 routine
+## Go Host Binding
 
-```json
-[
-  {
-    "let": {
-      "a": {
-        "routine": {
-          "Fetch": [
-            { "pkg": "svc" },
-            { "literal": { "type": "string", "value": "a" } }
-          ]
-        }
-      }
-    }
-  },
-  {
-    "let": {
-      "b": {
-        "routine": {
-          "Fetch": [
-            { "pkg": "svc" },
-            { "literal": { "type": "string", "value": "b" } }
-          ]
-        }
-      }
-    }
-  },
-  {
-    "return": {
-      "await": [
-        { "var": "a" },
-        { "var": "b" }
-      ]
-    }
-  }
-]
-```
-
-多个 handle 返回 `array<any>`，结果顺序按 `await` 输入顺序排列。
-
-### 4. 重复 await 同一个 handle
-
-```json
-[
-  {
-    "let": {
-      "h": {
-        "routine": {
-          "Pair": [
-            { "pkg": "svc" },
-            { "literal": { "type": "string", "value": "abc" } }
-          ]
-        }
-      }
-    }
-  },
-  { "let": { "first": { "await": { "var": "h" } } } },
-  { "let": { "second": { "await": { "var": "h" } } } },
-  { "return": { "==": [ { "var": "first" }, { "var": "second" } ] } }
-]
-```
-
-handle 会缓存完成结果或错误，重复 `await` 复用同一份结果。
-
-### 5. 多返回值
-
-Go 宿主函数：
+Host functions are registered as package functions:
 
 ```go
-func Pair(s string) (string, int64, error)
+reg := wflang.NewRegistry()
+err := reg.BindGoPackage("orders", wflang.PackageSpec{
+	Functions: []wflang.FuncSpec{
+		{GoName: "Reserve", Impl: Reserve},
+		{GoName: "Pay", Impl: Pay},
+	},
+})
 ```
 
-wflang：
+JSON calls the registered package explicitly:
 
 ```json
-[
-  {
-    "let": {
-      "h": {
-        "routine": {
-          "Pair": [
-            { "pkg": "svc" },
-            { "literal": { "type": "string", "value": "abc" } }
-          ]
-        }
-      }
-    }
-  },
-  {
-    "return": {
-      "await": { "var": "h" }
-    }
-  }
-]
+{
+  "Reserve": [
+    { "pkg": "orders" },
+    { "var": "orderID" }
+  ]
+}
 ```
 
-返回类型是 `tuple<string,int64,error>`。最后一位是 `error` 值，成功时其 Go 承载值为 `nil`。
-
-### 6. 只有 error 返回值
-
-Go 宿主函数：
+Go types can be bound so exported methods are callable on typed values:
 
 ```go
-func Save(s string) error
+err := reg.AutoBindType((*OrderService)(nil))
 ```
 
-wflang：
+The runtime supports context-aware functions, capability checks, pure stdlib registration, structured `LangError` diagnostics, and budget limits for steps, arrays, object keys, recursion, and routines.
 
-```json
-[
-  {
-    "let": {
-      "h": {
-        "routine": {
-          "Save": [
-            { "pkg": "svc" },
-            { "var": "payload" }
-          ]
-        }
-      }
-    }
-  },
-  {
-    "return": {
-      "await": { "var": "h" }
-    }
-  }
-]
+## Error Semantics
+
+Go return shapes map directly into wlang values:
+
+| Go signature | wlang result |
+| --- | --- |
+| `func(...) T` | `T` |
+| `func(...) error` | `error` value, with `nil` represented as a typed null-like error carrier |
+| `func(...) (T, error)` | `tuple<T,error>` |
+| `func(...) (T1, T2)` | `tuple<T1,T2>` |
+| `func(...) (T1, T2, error)` | `tuple<T1,T2,error>` |
+
+Program logic handles error values explicitly through variables, tuple destructuring, comparisons, and host helper functions. Go panic, context cancellation, and budget exhaustion surface as `LangError`.
+
+## Language Surface
+
+Core values and collections:
+
+- scalar typed literals: `string`, `boolean`, fixed-width integers, floats, `bigInt`, `bigDecimal`, `null`, `error`
+- `array<T>` with `arr.push`, `arr.get`, `arr.len`, and related stdlib helpers
+- `map<K,V>` literals and `m.get`, `m.set`, `m.del`, `m.has`, `m.keys`, `m.values`, `m.len`
+- struct literals for registered Go struct types
+- `chan<T>` with `ch.send`, `ch.recv`, `ch.close`, `ch.len`, `ch.cap`
+- `tuple<...>` values and destructuring
+- first-class `func<...>` values with lexical capture
+
+Statements and control flow:
+
+- `let`, typed `let`, tuple destructuring, and `_` discard
+- `set`
+- `if`, `match`
+- `foreach` over arrays and maps
+- `fori`
+- `break`, `continue`, `return`, named return
+- `defer` over host calls and function calls
+- `routine`, `await`
+- `select` over channel send, receive, and default cases
+- `panic`
+
+The full language reference lives in [LANGUAGE.md](LANGUAGE.md).
+
+## go2wlang
+
+`go2wlang` translates a deliberately constrained Go subset into wlang JSON. It is designed for rule functions and orchestration functions where domain behavior remains in registered Go packages.
+
+CLI usage:
+
+```bash
+go run ./cmd/go2wl -func ApprovalRule go2wlang/examples/approval_rule.go
+go run ./cmd/go2wl -func ApprovalRule -pseudo go2wlang/examples/approval_rule.go
+go run ./cmd/go2wl -func OrderWorkflow -embed-import-map go2wlang/examples/order_workflow.go
 ```
 
-成功时返回 `error` typed value，Go 承载值为 `nil`。
-
-### 7. 显式处理 routine tuple error
-
-Go 宿主函数：
+Library usage:
 
 ```go
-func Save(s string) (string, error)
+jsonProgram, err := go2wlang.TranslateFilePath("rules/rule.go", go2wlang.Options{
+	FuncName: "Rule",
+})
+
+result, err := go2wlang.TranslateFilePathDetailed("rules/rule.go", go2wlang.Options{
+	FuncName:       "Rule",
+	EmbedImportMap: true,
+})
 ```
 
-```json
-[
-  {
-    "let": {
-      "h": {
-        "routine": {
-          "Save": [
-            { "pkg": "svc" },
-            { "var": "payload" }
-          ]
-        }
-      }
-    }
-  },
-  {
-    "let": [
-      [
-        "_",
-        "err"
-      ],
-      [
-        "string",
-        "error"
-      ],
-      {
-        "await": { "var": "h" }
-      }
-    ]
-  },
-  {
-    "return": {
-      "Error": [{ "var": "err" }]
-    }
-  }
-]
+Supported Go patterns include package calls, receiver method calls, struct literals, named returns, `defer func(){...}()`, closures, arrays of function values, `append` to `arr.push`, `len` to `arr.len`, reverse compensation loops, goroutines, channels, and `select`.
+
+Detailed translator documentation:
+
+- [go2wlang/README.md](go2wlang/README.md)
+- [go2wlang/SUPPORT.md](go2wlang/SUPPORT.md)
+- [go2wlang/examples](go2wlang/examples)
+
+## Formatter
+
+`wlfmt` renders executable JSON as stable JSON or pseudocode:
+
+```bash
+go run ./cmd/wlfmt examples/full_feature_demo.json
+go run ./cmd/wlfmt -json examples/full_feature_demo.json
 ```
 
-Go `error` 是普通语言值。`func Save() error` 成功时得到 Go 承载值为 `nil` 的 `error` typed value，失败时得到承载原始 Go error 的 `error` typed value。`(T, error)` 会得到 `tuple<T,error>`，可以用 tuple 解构拿到 error slot；调用 `Error` 前应保证该 slot 承载非 nil error。
+`go2wl -pseudo` uses the same formatter so generated JSON can be reviewed in a compact, Go-like form.
 
-### 8. 参数捕获语义
+## Security Model
 
-```json
-[
-  {
-    "let": {
-      "token": {
-        "literal": { "type": "string", "value": "before" }
-      }
-    }
-  },
-  {
-    "let": {
-      "h": {
-        "routine": {
-          "Echo": [
-            { "pkg": "svc" },
-            { "var": "token" }
-          ]
-        }
-      }
-    }
-  },
-  {
-    "set": {
-      "token": {
-        "literal": { "type": "string", "value": "after" }
-      }
-    }
-  },
-  {
-    "return": {
-      "await": { "var": "h" }
-    }
-  }
-]
+wlang executes inside the host process, so the host controls the available surface area:
+
+- only registered packages and bound methods are callable
+- side effects are exposed through explicit host bindings
+- capabilities gate sensitive host functions
+- budgets limit steps, recursion, arrays, maps, and routines
+- context cancellation stops blocking operations such as channel send/receive and routine waits
+- structured diagnostics preserve error code and JSON path
+
+This model keeps the language core small and moves application-specific authority into Go.
+
+## Project Layout
+
+```text
+ast/          JSON AST nodes
+compiler/     parser, normalizer, type checker, migration, diagnostics
+errors/       structured LangError codes
+go2wlang/     Go subset translator
+registry/     Go host binding and reflection bridge
+runtime/      executor, scope, closures, routines, channels
+stdlib/       pure built-in packages
+types/        typed value model
+wflang/       public Go API
+cmd/go2wl/    Go-to-wlang CLI
+cmd/wlfmt/    formatter CLI
+examples/     JSON language examples
 ```
 
-`routine` 在启动点求值 receiver 和参数，所以传给 `Echo` 的是 `"before"`。
+## Development
 
-### 9. 语义规则
+Run the full test suite:
 
-- `routine` 内容可以是单个宿主调用：`{ "GoName": [receiver, ...args] }`，也可以是 `{"do":[...]}` 语句块。
-- `routine` 返回 `routineHandle`。
-- `await` 单个 handle 时返回该 routine 的 typed value。
-- `await` 多个 handle 时返回 `array<any>`。
-- 多返回值使用 `tuple<T1,T2,...>`；最后一位是 Go `error` 时保留为 `error` slot。
-- 只有 `error` 返回值时返回 `error` typed value，成功时 Go 承载值为 `nil`。
-- routine 内最后返回形态遵循普通求值规则，含 error 的 host call 结果会保留 error 值或 tuple。
-- `await` 接收非 `routineHandle` 时返回 `E_TYPE`。
-- `routine` 需要 `routine:spawn` capability。
-- `routine` 受 `MaxRoutines` 预算限制。
+```bash
+env -u GOROOT -u GOTOOLCHAIN go test ./...
+```
 
-复杂并发流程可以放在 `routine.do` 中；涉及共享状态、事务或外部副作用的复杂流程仍建议封装在 Go 宿主函数中。
+Run the formatter on the feature demo:
+
+```bash
+go run ./cmd/wlfmt examples/full_feature_demo.json
+```
+
+Generate JSON from the compensation-flow example:
+
+```bash
+go run ./cmd/go2wl -func OrderWorkflow go2wlang/examples/order_workflow.go
+```
+
+## Documentation
+
+- [LANGUAGE.md](LANGUAGE.md): language reference and semantics
+- [SPEC_TESTS.md](SPEC_TESTS.md): specification-oriented test coverage
+- [examples/README.md](examples/README.md): JSON feature demo notes
+- [go2wlang/README.md](go2wlang/README.md): translator usage and API
+- [go2wlang/SUPPORT.md](go2wlang/SUPPORT.md): supported and unsupported Go patterns
