@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 func tc440Fetch(url string) string { return "fetched:" + url }

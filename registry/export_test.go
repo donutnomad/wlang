@@ -3,7 +3,7 @@ package registry_test
 import (
 	"testing"
 
-	"github.com/wflang/wflang/registry"
+	"github.com/donutnomad/wlang/registry"
 )
 
 // §11: Registry.ExportLanguageSpec 至少暴露包/函数/类型方法元数据。

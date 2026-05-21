@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-056 pkg 与 var 命名空间隔离 --------------------------------------

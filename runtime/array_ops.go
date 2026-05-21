@@ -3,9 +3,9 @@ package runtime
 import (
 	"strings"
 
-	"github.com/wflang/wflang/ast"
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/ast"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/types"
 )
 
 func arrayPush(e *Executor, c *ast.Call) (types.Value, error) {

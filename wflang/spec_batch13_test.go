@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-201 continue 在循环外报错 (break 由 batch4 覆盖) ---------------

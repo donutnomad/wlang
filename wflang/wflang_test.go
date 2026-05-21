@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/wflang"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // Book is a sample domain type.

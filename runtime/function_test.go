@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wflang/wflang/compiler"
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/compiler"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/types"
 )
 
 func runSrcWithScope(t *testing.T, src string, scope *Scope) (types.Value, error) {

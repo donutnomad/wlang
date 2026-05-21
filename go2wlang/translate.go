@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // Options configures Go to wlang translation.

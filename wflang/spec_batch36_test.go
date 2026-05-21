@@ -6,8 +6,8 @@ package wflang_test
 import (
 	"testing"
 
-	"github.com/wflang/wflang/compiler"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/compiler"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // TC-600: With Trace enabled, CompileJSON must record an ordered list of

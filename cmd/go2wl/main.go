@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wflang/wflang/go2wlang"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/go2wlang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 func main() {

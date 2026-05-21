@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/wflang"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-054 顶级 Vars 默认只读 ------------------------------------------

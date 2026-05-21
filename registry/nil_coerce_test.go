@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/types"
 )
 
 func TestInvokeCoercesNilErrorValueToNilInterface(t *testing.T) {

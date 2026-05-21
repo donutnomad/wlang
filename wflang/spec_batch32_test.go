@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/wflang"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // ---------- TC-158 lang 版本冲突 ---------------------------------------------

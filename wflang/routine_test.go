@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // publisher with both successful and failing methods.

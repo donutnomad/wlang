@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 func tc464Add(a, b int64) int64 { return a + b }

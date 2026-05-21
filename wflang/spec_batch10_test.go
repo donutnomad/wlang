@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-089 重载安全数值提升 -------------------------------------------
@@ -22,7 +22,7 @@ func TestTC089_SafeNumericWidening(t *testing.T) {
 	if err := reg.AutoBindType(Widener{}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := reg.BindMethodOverloads("github.com/wflang/wflang/wflang_test.Widener",
+	if err := reg.BindMethodOverloads("github.com/donutnomad/wlang/wflang_test.Widener",
 		"Add", []wflang.GoMethodOverload{
 			{GoMethod: "AddInt64"},
 			{GoMethod: "AddFloat64"},

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wflang/wflang/compiler"
+	"github.com/donutnomad/wlang/compiler"
 )
 
 func TestExamplesFullFeatureDemoParses(t *testing.T) {

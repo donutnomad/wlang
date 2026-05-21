@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // ---------- TC-1001 任意 Go 类型可安全映射 ---------------------------------

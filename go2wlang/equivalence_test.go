@@ -5,10 +5,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/wflang/wflang/go2wlang"
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/types"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/go2wlang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/types"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 type eqUser struct {

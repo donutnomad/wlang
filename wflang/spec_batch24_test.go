@@ -9,8 +9,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-906 编译后 Program 复用 -----------------------------------------
@@ -262,7 +262,7 @@ func TestTC323_UnregisteredReturnAutoTypeName(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	// AutoHostTypeName format: "*<pkgPath>.<TypeName>".
-	want := "*github.com/wflang/wflang/wflang_test.tc323Hidden"
+	want := "*github.com/donutnomad/wlang/wflang_test.tc323Hidden"
 	if v.TypeName() != want {
 		t.Fatalf("want %q, got %q", want, v.TypeName())
 	}

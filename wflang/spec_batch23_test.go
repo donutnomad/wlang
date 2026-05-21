@@ -3,8 +3,8 @@ package wflang_test
 import (
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-647 安全数值提升：int8 实参命中 int64 形参 ------------------

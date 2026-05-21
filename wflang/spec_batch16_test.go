@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-071 语句矩阵：let / set / if / foreach / return 最小程序 -----

@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wflang/wflang/ast"
-	"github.com/wflang/wflang/compiler"
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/ast"
+	"github.com/donutnomad/wlang/compiler"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/types"
 )
 
 // FormatJSON pretty-prints a wflang JSON document with 2-space indent and

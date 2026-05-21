@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // ---------- TC-038 包函数调用 Len(str,"hello") ---------------------------
@@ -192,7 +192,7 @@ func TestTC087_BindMethodOverloadsMerge(t *testing.T) {
 		t.Fatalf("bind: %v", err)
 	}
 	if err := reg.BindMethodOverloads(
-		"*github.com/wflang/wflang/wflang_test.tc087Counter",
+		"*github.com/donutnomad/wlang/wflang_test.tc087Counter",
 		"Add", []wflang.GoMethodOverload{
 			{GoMethod: "AddInt8"},
 			{GoMethod: "AddInt64"},
@@ -226,7 +226,7 @@ func TestTC088_OverloadDispatchExactInt8(t *testing.T) {
 		t.Fatalf("bind: %v", err)
 	}
 	if err := reg.BindMethodOverloads(
-		"*github.com/wflang/wflang/wflang_test.tc087Counter",
+		"*github.com/donutnomad/wlang/wflang_test.tc087Counter",
 		"Add", []wflang.GoMethodOverload{
 			{GoMethod: "AddInt8"},
 			{GoMethod: "AddInt64"},

@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/types"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/types"
 )
 
 // varBinding records a runtime variable.

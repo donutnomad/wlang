@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	werr "github.com/wflang/wflang/errors"
+	werr "github.com/donutnomad/wlang/errors"
 )
 
 // Built-in language type names.

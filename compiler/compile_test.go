@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/wflang/wflang/ast"
-	"github.com/wflang/wflang/compiler"
+	"github.com/donutnomad/wlang/ast"
+	"github.com/donutnomad/wlang/compiler"
 )
 
 // §7.8: 常量折叠 — 纯 typed literal 上的算术应折叠成一个 literal。

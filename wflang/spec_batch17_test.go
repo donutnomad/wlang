@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-601 Normalize：单参数转数组 -----------------------------------
@@ -141,7 +141,7 @@ func TestTC646_ExactTypePriority(t *testing.T) {
 	if err := reg.AutoBindType(tc646Dual{}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := reg.BindMethodOverloads("github.com/wflang/wflang/wflang_test.tc646Dual",
+	if err := reg.BindMethodOverloads("github.com/donutnomad/wlang/wflang_test.tc646Dual",
 		"Hit", []wflang.GoMethodOverload{
 			{GoMethod: "HitInt64"},
 			{GoMethod: "HitFloat64"},

@@ -2,7 +2,7 @@
 // Every node carries a JSON Pointer so diagnostics can locate the source.
 package ast
 
-import "github.com/wflang/wflang/types"
+import "github.com/donutnomad/wlang/types"
 
 // Node is the AST interface. All nodes expose their JSON Pointer path.
 type Node interface {

@@ -96,12 +96,12 @@ type book struct{}
 
 func TestAutoHostTypeName(t *testing.T) {
 	got := AutoHostTypeName(reflect.TypeOf(&book{}))
-	want := "*github.com/wflang/wflang/types.book"
+	want := "*github.com/donutnomad/wlang/types.book"
 	if got != want {
 		t.Fatalf("got=%q want=%q", got, want)
 	}
 	got2 := AutoHostTypeName(reflect.TypeOf(book{}))
-	want2 := "github.com/wflang/wflang/types.book"
+	want2 := "github.com/donutnomad/wlang/types.book"
 	if got2 != want2 {
 		t.Fatalf("non-pointer: got=%q want=%q", got2, want2)
 	}

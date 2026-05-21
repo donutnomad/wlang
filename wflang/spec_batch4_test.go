@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-013 bigInt / bigDecimal 映射 ------------------------------------

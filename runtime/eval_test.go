@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wflang/wflang/compiler"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/compiler"
+	"github.com/donutnomad/wlang/types"
 )
 
 // runSrc parses and runs a wflang program, returning the program result.

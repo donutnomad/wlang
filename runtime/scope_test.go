@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wflang/wflang/compiler"
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/compiler"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/types"
 )
 
 // runWith injects top-level variables then parses and runs src.

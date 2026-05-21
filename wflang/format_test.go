@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // §12.2: Formatter 必须产生稳定 key 顺序。

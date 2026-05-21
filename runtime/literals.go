@@ -3,9 +3,9 @@ package runtime
 import (
 	"reflect"
 
-	"github.com/wflang/wflang/ast"
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/ast"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/types"
 )
 
 // evalStructLit instantiates a registered Go struct (LANGUAGE.md §3.9).

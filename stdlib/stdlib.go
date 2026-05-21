@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/types"
 )
 
 // RegisterCore binds all pure standard library packages to r.

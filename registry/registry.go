@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"sync"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/types"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/types"
 )
 
 // ParamSpec describes one parameter of a host function.

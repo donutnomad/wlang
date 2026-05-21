@@ -14,10 +14,10 @@ import (
 	"strings"
 	"testing"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/types"
-	"github.com/wflang/wflang/wflang"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/types"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // ---------- TC-360 Constructor ----------------------------------------------

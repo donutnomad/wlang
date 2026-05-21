@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-017 自动宿主类型可继续传递 ------------------------------------
@@ -98,7 +98,7 @@ func TestTC106_TypedLiteralConverges(t *testing.T) {
 	if err := reg.AutoBindType(addDual{}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := reg.BindMethodOverloads("github.com/wflang/wflang/wflang_test.addDual",
+	if err := reg.BindMethodOverloads("github.com/donutnomad/wlang/wflang_test.addDual",
 		"Add", []wflang.GoMethodOverload{
 			{GoMethod: "AddInt64"},
 			{GoMethod: "AddFloat64"},

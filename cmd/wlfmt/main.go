@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 func main() {

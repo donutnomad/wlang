@@ -10,8 +10,8 @@ package compiler
 import (
 	"encoding/json"
 
-	"github.com/wflang/wflang/ast"
-	werr "github.com/wflang/wflang/errors"
+	"github.com/donutnomad/wlang/ast"
+	werr "github.com/donutnomad/wlang/errors"
 )
 
 // Deprecation is one entry in the deprecation table (LANGUAGE.md §13.2).

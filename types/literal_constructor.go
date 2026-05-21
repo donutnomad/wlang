@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"sync"
 
-	werr "github.com/wflang/wflang/errors"
+	werr "github.com/donutnomad/wlang/errors"
 )
 
 // LiteralConstructor decodes a typed-literal raw string into a Go value.

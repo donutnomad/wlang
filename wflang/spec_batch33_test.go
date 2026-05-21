@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // ---------- TC-905 match 表达式 ----------------------------------------------

@@ -3,8 +3,8 @@ package wflang
 import (
 	"encoding/json"
 
-	"github.com/wflang/wflang/compiler"
-	werr "github.com/wflang/wflang/errors"
+	"github.com/donutnomad/wlang/compiler"
+	werr "github.com/donutnomad/wlang/errors"
 )
 
 // ConfigBuilder builds JSONLogic AST trees programmatically (LANGUAGE.md §5.6 / §11).

@@ -5,8 +5,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-602 Normalize：大整数字面量保持精度 -------------------------
@@ -51,7 +51,7 @@ func TestTC645_OverloadStableAcrossRuns(t *testing.T) {
 	if err := reg.AutoBindType(tc645Box{}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := reg.BindMethodOverloads("github.com/wflang/wflang/wflang_test.tc645Box",
+	if err := reg.BindMethodOverloads("github.com/donutnomad/wlang/wflang_test.tc645Box",
 		"Pick", []wflang.GoMethodOverload{
 			{GoMethod: "PickInt"},
 			{GoMethod: "PickFloat"},
@@ -94,7 +94,7 @@ func TestTC650_AmbiguousOverload(t *testing.T) {
 	if err := reg.AutoBindType(tc650Amb{}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := reg.BindMethodOverloads("github.com/wflang/wflang/wflang_test.tc650Amb",
+	if err := reg.BindMethodOverloads("github.com/donutnomad/wlang/wflang_test.tc650Amb",
 		"Take", []wflang.GoMethodOverload{
 			{GoMethod: "TakeA"},
 			{GoMethod: "TakeB"},

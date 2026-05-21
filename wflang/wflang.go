@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/wflang/wflang/ast"
-	"github.com/wflang/wflang/compiler"
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/runtime"
-	"github.com/wflang/wflang/stdlib"
-	"github.com/wflang/wflang/types"
+	"github.com/donutnomad/wlang/ast"
+	"github.com/donutnomad/wlang/compiler"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/runtime"
+	"github.com/donutnomad/wlang/stdlib"
+	"github.com/donutnomad/wlang/types"
 )
 
 // Value is re-exported for convenience.

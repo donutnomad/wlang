@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // --- TC-400 NewEngine + CompileJSON + Run 全流程 ----------------------

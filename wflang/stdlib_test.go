@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // TC-807-style: DefaultRegistry exposes pure stdlib (str.Len here).

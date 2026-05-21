@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	werr "github.com/wflang/wflang/errors"
-	"github.com/wflang/wflang/wflang"
+	werr "github.com/donutnomad/wlang/errors"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // Counter exposes AddInt8/AddInt64/AddFloat64 for overload tests.
@@ -21,7 +21,7 @@ func buildCounterEngine(t *testing.T) *wflang.Engine {
 	if err := reg.AutoBindType((*Counter)(nil)); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := reg.BindMethodOverloads("*github.com/wflang/wflang/wflang_test.Counter",
+	if err := reg.BindMethodOverloads("*github.com/donutnomad/wlang/wflang_test.Counter",
 		"Add", []wflang.GoMethodOverload{
 			{GoMethod: "AddInt8"},
 			{GoMethod: "AddInt64"},
@@ -91,7 +91,7 @@ func TestTC091_AmbiguousOverload(t *testing.T) {
 	if err := reg.AutoBindType(Ambi{}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if err := reg.BindMethodOverloads("github.com/wflang/wflang/wflang_test.Ambi",
+	if err := reg.BindMethodOverloads("github.com/donutnomad/wlang/wflang_test.Ambi",
 		"Add", []wflang.GoMethodOverload{
 			{GoMethod: "AddA"},
 			{GoMethod: "AddB"},

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wflang/wflang/registry"
-	"github.com/wflang/wflang/wflang"
+	"github.com/donutnomad/wlang/registry"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // ---------- TC-830 Trace 字段完备 ---------------------------------------

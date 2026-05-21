@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wflang/wflang/compiler"
-	werr "github.com/wflang/wflang/errors"
+	"github.com/donutnomad/wlang/compiler"
+	werr "github.com/donutnomad/wlang/errors"
 )
 
 // assertCode compiles src and asserts the resulting diagnostic has the given code.
