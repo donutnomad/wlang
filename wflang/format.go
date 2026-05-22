@@ -165,6 +165,14 @@ func (f *pseudoFormatter) stmt(n ast.Node, indent int) {
 	case *ast.Panic:
 		f.line(indent, "panic("+f.expr(x.Expr)+")")
 	case *ast.ExprStmt:
+		if stmt, ok := f.mapMutationStmt(x.Expr); ok {
+			f.line(indent, stmt)
+			return
+		}
+		if stmt, ok := f.arraySetStmt(x.Expr); ok {
+			f.line(indent, stmt)
+			return
+		}
 		f.line(indent, f.expr(x.Expr))
 	case *ast.Routine:
 		f.line(indent, f.expr(x))
@@ -235,6 +243,34 @@ func (f *pseudoFormatter) selectStmt(x *ast.SelectStmt, indent int) {
 		f.line(indent+1, "}")
 	}
 	f.line(indent, "}")
+}
+
+func (f *pseudoFormatter) mapMutationStmt(n ast.Node) (string, bool) {
+	c, ok := n.(*ast.Call)
+	if !ok {
+		return "", false
+	}
+	switch canonicalMapOp(c.Op) {
+	case "map.set":
+		if len(c.Args) != 3 {
+			return "", false
+		}
+		return fmt.Sprintf("%s[%s] = %s", f.expr(c.Args[0]), f.expr(c.Args[1]), f.expr(c.Args[2])), true
+	case "map.del":
+		if len(c.Args) != 2 {
+			return "", false
+		}
+		return fmt.Sprintf("delete(%s, %s)", f.expr(c.Args[0]), f.expr(c.Args[1])), true
+	}
+	return "", false
+}
+
+func (f *pseudoFormatter) arraySetStmt(n ast.Node) (string, bool) {
+	c, ok := n.(*ast.Call)
+	if !ok || c.Op != "arr.set" || len(c.Args) != 3 {
+		return "", false
+	}
+	return fmt.Sprintf("%s[%s] = %s", f.expr(c.Args[0]), f.expr(c.Args[1]), f.expr(c.Args[2])), true
 }
 
 func selectBindList(names ...string) string {
@@ -345,8 +381,14 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 	if isPrefixOp(c.Op) && len(c.Args) == 1 {
 		return c.Op + f.expr(c.Args[0])
 	}
+	if expr, ok := f.arrayBuiltinExpr(c); ok {
+		return expr
+	}
+	if expr, ok := f.mapBuiltinExpr(c); ok {
+		return expr
+	}
 	if isBuiltinCallOp(c.Op) && len(c.Args) > 0 {
-		return c.Op + "(" + f.exprList(c.Args) + ")"
+		return canonicalDisplayOp(c.Op) + "(" + f.exprList(c.Args) + ")"
 	}
 	if len(c.Args) > 0 {
 		if pkg, ok := c.Args[0].(*ast.Pkg); ok {
@@ -357,12 +399,56 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 	return c.Op + "(" + f.exprList(c.Args) + ")"
 }
 
+func (f *pseudoFormatter) arrayBuiltinExpr(c *ast.Call) (string, bool) {
+	switch c.Op {
+	case "arr.len":
+		if len(c.Args) != 1 {
+			return "", false
+		}
+		return f.expr(c.Args[0]) + ".length", true
+	case "arr.get":
+		if len(c.Args) != 2 {
+			return "", false
+		}
+		return fmt.Sprintf("%s[%s]", f.expr(c.Args[0]), f.expr(c.Args[1])), true
+	case "arr.slice":
+		if len(c.Args) != 3 {
+			return "", false
+		}
+		return fmt.Sprintf("%s[%s:%s]", f.expr(c.Args[0]), f.expr(c.Args[1]), f.expr(c.Args[2])), true
+	}
+	return "", false
+}
+
+func (f *pseudoFormatter) mapBuiltinExpr(c *ast.Call) (string, bool) {
+	switch canonicalMapOp(c.Op) {
+	case "map.get", "map.value":
+		if len(c.Args) != 2 {
+			return "", false
+		}
+		return fmt.Sprintf("%s[%s]", f.expr(c.Args[0]), f.expr(c.Args[1])), true
+	}
+	return "", false
+}
+
+func canonicalMapOp(op string) string {
+	if strings.HasPrefix(op, "m.") {
+		return "map." + strings.TrimPrefix(op, "m.")
+	}
+	return op
+}
+
+func canonicalDisplayOp(op string) string {
+	return canonicalMapOp(op)
+}
+
 func isBuiltinCallOp(op string) bool {
 	return op == "await" ||
 		op == "copy" ||
 		op == "complex" ||
 		op == "real" ||
 		op == "imag" ||
+		strings.HasPrefix(op, "map.") ||
 		strings.HasPrefix(op, "m.") ||
 		strings.HasPrefix(op, "ch.") ||
 		strings.HasPrefix(op, "arr.") ||

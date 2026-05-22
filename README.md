@@ -187,7 +187,7 @@ Core values and collections:
 
 - scalar typed literals: `string`, `boolean`, fixed-width integers, floats, `bigInt`, `bigDecimal`, `null`, `error`
 - `array<T>` with `arr.push`, `arr.get`, `arr.len`, and related stdlib helpers
-- `map<K,V>` literals and `m.get`, `m.set`, `m.del`, `m.has`, `m.keys`, `m.values`, `m.len`
+- `map<K,V>` literals and `map.get`, `map.set`, `map.del`, `map.has`, `map.keys`, `map.values`, `map.len`
 - struct literals for registered Go struct types
 - `chan<T>` with `ch.send`, `ch.recv`, `ch.close`, `ch.len`, `ch.cap`
 - `tuple<...>` values and destructuring
@@ -206,7 +206,7 @@ Statements and control flow:
 - `select` over channel send, receive, and default cases
 - `panic`
 
-The full language reference lives in [LANGUAGE.md](LANGUAGE.md).
+The full language reference lives in [LANGUAGE.md](LANGUAGE.md). For a shorter walkthrough of JSON, pseudo output, go2wlang, and built-in namespaces, see [QUICKSTART.md](QUICKSTART.md).
 
 ## go2wlang
 
@@ -304,6 +304,7 @@ go run ./cmd/go2wl -func OrderWorkflow go2wlang/examples/order_workflow.go
 
 ## Documentation
 
+- [QUICKSTART.md](QUICKSTART.md): quick walkthrough and built-in namespace reference
 - [LANGUAGE.md](LANGUAGE.md): language reference and semantics
 - [SPEC_TESTS.md](SPEC_TESTS.md): specification-oriented test coverage
 - [examples/README.md](examples/README.md): JSON feature demo notes

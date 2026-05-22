@@ -313,7 +313,7 @@
     },
     {
       "expr": {
-        "m.set": [
+        "map.set": [
           {
             "var": "labels"
           },
@@ -340,7 +340,7 @@
           "boolean"
         ],
         {
-          "m.get": [
+          "map.get": [
             {
               "var": "labels"
             },
@@ -357,7 +357,7 @@
     {
       "let": {
         "labelKeys": {
-          "m.keys": [
+          "map.keys": [
             {
               "var": "labels"
             }
@@ -368,7 +368,7 @@
     {
       "let": {
         "labelCount": {
-          "m.len": [
+          "map.len": [
             {
               "var": "labels"
             }
@@ -378,7 +378,7 @@
     },
     {
       "expr": {
-        "m.del": [
+        "map.del": [
           {
             "var": "labels"
           },

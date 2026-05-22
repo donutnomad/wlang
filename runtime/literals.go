@@ -234,7 +234,7 @@ func mapGet(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 2 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.get expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.get expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	kv, err := e.Eval(c.Args[1])
 	if err != nil {
@@ -242,7 +242,7 @@ func mapGet(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	rk, err := coerceToReflect(kv, rv.Type().Key())
 	if err != nil {
-		return types.Value{}, werr.Newf(werr.CodeType, "m.get key: %v", err).WithPath(c.Path())
+		return types.Value{}, werr.Newf(werr.CodeType, "map.get key: %v", err).WithPath(c.Path())
 	}
 	got := rv.MapIndex(rk)
 	if !got.IsValid() {
@@ -262,7 +262,7 @@ func mapValue(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 2 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.value expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.value expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	kv, err := e.Eval(c.Args[1])
 	if err != nil {
@@ -270,7 +270,7 @@ func mapValue(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	rk, err := coerceToReflect(kv, rv.Type().Key())
 	if err != nil {
-		return types.Value{}, werr.Newf(werr.CodeType, "m.value key: %v", err).WithPath(c.Path())
+		return types.Value{}, werr.Newf(werr.CodeType, "map.value key: %v", err).WithPath(c.Path())
 	}
 	got := rv.MapIndex(rk)
 	if !got.IsValid() {
@@ -286,7 +286,7 @@ func mapSet(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 3 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.set expects (map, key, value), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.set expects (map, key, value), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	kv, err := e.Eval(c.Args[1])
 	if err != nil {
@@ -298,11 +298,11 @@ func mapSet(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	rk, err := coerceToReflect(kv, rv.Type().Key())
 	if err != nil {
-		return types.Value{}, werr.Newf(werr.CodeType, "m.set key: %v", err).WithPath(c.Path())
+		return types.Value{}, werr.Newf(werr.CodeType, "map.set key: %v", err).WithPath(c.Path())
 	}
 	rvalue, err := coerceToReflect(vv, rv.Type().Elem())
 	if err != nil {
-		return types.Value{}, werr.Newf(werr.CodeType, "m.set value: %v", err).WithPath(c.Path())
+		return types.Value{}, werr.Newf(werr.CodeType, "map.set value: %v", err).WithPath(c.Path())
 	}
 	rv.SetMapIndex(rk, rvalue)
 	null, _ := types.NewNull()
@@ -316,7 +316,7 @@ func mapDel(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 2 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.del expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.del expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	kv, err := e.Eval(c.Args[1])
 	if err != nil {
@@ -324,7 +324,7 @@ func mapDel(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	rk, err := coerceToReflect(kv, rv.Type().Key())
 	if err != nil {
-		return types.Value{}, werr.Newf(werr.CodeType, "m.del key: %v", err).WithPath(c.Path())
+		return types.Value{}, werr.Newf(werr.CodeType, "map.del key: %v", err).WithPath(c.Path())
 	}
 	rv.SetMapIndex(rk, reflect.Value{})
 	null, _ := types.NewNull()
@@ -338,7 +338,7 @@ func mapHas(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 2 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.has expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.has expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	kv, err := e.Eval(c.Args[1])
 	if err != nil {
@@ -346,7 +346,7 @@ func mapHas(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	rk, err := coerceToReflect(kv, rv.Type().Key())
 	if err != nil {
-		return types.Value{}, werr.Newf(werr.CodeType, "m.has key: %v", err).WithPath(c.Path())
+		return types.Value{}, werr.Newf(werr.CodeType, "map.has key: %v", err).WithPath(c.Path())
 	}
 	return types.NewValue(types.TBoolean, rv.MapIndex(rk).IsValid()), nil
 }
@@ -358,7 +358,7 @@ func mapLen(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 1 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.len expects (map), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.len expects (map), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	return types.NewValue(types.TInt64, int64(rv.Len())), nil
 }
@@ -370,7 +370,7 @@ func mapKeys(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 1 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.keys expects (map), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.keys expects (map), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	keys := rv.MapKeys()
 	out := make([]types.Value, 0, len(keys))
@@ -387,7 +387,7 @@ func mapValues(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if len(c.Args) != 1 {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
-			"m.values expects (map), got %d args", len(c.Args)).WithPath(c.Path())
+			"map.values expects (map), got %d args", len(c.Args)).WithPath(c.Path())
 	}
 	iter := rv.MapRange()
 	out := make([]types.Value, 0, rv.Len())

@@ -779,7 +779,7 @@ func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			return t.tupleAssign(x, map[string]any{"m.get": []any{target, key}})
+			return t.tupleAssign(x, map[string]any{"map.get": []any{target, key}})
 		}
 		return t.tupleAssign(x, nil)
 	}
@@ -842,8 +842,8 @@ func (t *translator) indexAssign(idx *ast.IndexExpr, tok token.Token, rhs ast.Ex
 	setOp := "arr.set"
 	getOp := "arr.get"
 	if t.isMapExpr(idx.X) {
-		setOp = "m.set"
-		getOp = "m.value"
+		setOp = "map.set"
+		getOp = "map.value"
 	}
 	if tok == token.ASSIGN {
 		return []any{map[string]any{"expr": map[string]any{setOp: []any{target, key, val}}}}, nil
@@ -1272,7 +1272,7 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 			return nil, err
 		}
 		if t.isMapExpr(x.X) {
-			return map[string]any{"m.value": []any{target, idx}}, nil
+			return map[string]any{"map.value": []any{target, idx}}, nil
 		}
 		return map[string]any{"arr.get": []any{target, idx}}, nil
 	case *ast.SliceExpr:
@@ -1347,7 +1347,7 @@ func (t *translator) callExpr(x *ast.CallExpr) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"m.del": []any{target, key}}, nil
+			return map[string]any{"map.del": []any{target, key}}, nil
 		case "cap":
 			if len(x.Args) != 1 {
 				return nil, t.unsupported(x, "cap requires one argument", "")

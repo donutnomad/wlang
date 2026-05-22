@@ -266,6 +266,41 @@ func OrderWorkflow(ctx workflow.Context, runner workflow.Runner, input OrderInpu
 	}
 }
 
+func TestTranslateFileMapBuiltinsUseMapNamespace(t *testing.T) {
+	src := []byte(`package rules
+
+func Rule(labels map[string]int64) int64 {
+	val, ok := labels["primary"]
+	if ok {
+		labels["copy"] = val
+	} else {
+		delete(labels, "primary")
+	}
+	return labels["copy"]
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	got := string(out)
+	for _, needle := range []string{
+		`"map.get"`,
+		`"map.set"`,
+		`"map.del"`,
+		`"map.value"`,
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in:\n%s", needle, got)
+		}
+	}
+	for _, legacy := range []string{`"m.get"`, `"m.set"`, `"m.del"`, `"m.value"`} {
+		if strings.Contains(got, legacy) {
+			t.Fatalf("found legacy %q in:\n%s", legacy, got)
+		}
+	}
+}
+
 func TestTranslateFileFunctionValueParameterCall(t *testing.T) {
 	src := []byte(`package rules
 
@@ -539,11 +574,11 @@ func TestExampleFeatureShowcaseTranslates(t *testing.T) {
 		"if n > 0 {",
 		"let pair = struct examples.ShowcaseItem {",
 		"pair.Name = call symbol examples.Identity(pair.Name)",
-		"arr.set(scores, 0, n)",
-		"let val, ok = m.get(labels, \"primary\")",
-		"m.set(labels, \"copy\", val)",
-		"m.del(labels, \"primary\")",
-		"let part = arr.slice(scores, 0, 1)",
+		"scores[0] = n",
+		"let val, ok = labels[\"primary\"]",
+		"labels[\"copy\"] = val",
+		"delete(labels, \"primary\")",
+		"let part = scores[0:1]",
 		"let copied = copy(scores, keyed)",
 		"let s, typeOK = type.assert.ok(input, \"string\")",
 		"if type.is(input, \"string\") {",

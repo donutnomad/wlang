@@ -35,7 +35,7 @@ go run ./cmd/go2wl -func FeatureShowcase go2wlang/examples/feature_showcase.go
 - `workflow.ExecuteActivity(...).Get(ctx, &reserve)` 生成嵌套 receiver call。
 - `if n := len(xs); n > 0` 生成前置 `let n = arr.len(xs)` 和普通 `if`。
 - `switch` 生成嵌套 `if`，type switch 生成 `type.is` / `type.assert`。
-- `m[k]` 双值读取生成 `m.get`，`m[k] = v` 生成 `m.set`。
+- `dict[k]` 双值读取生成 `map.get`，`dict[k] = v` 生成 `map.set`。
 - `xs[i] = v` 生成 `arr.set`，`xs[a:b]` 生成 `arr.slice`。
 - `new(T)`、`*ptr`、`copy`、`complex`、`real`、`imag` 生成对应内建调用。
 

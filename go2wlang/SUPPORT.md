@@ -123,8 +123,8 @@
 - 括号表达式
 - 接收表达式：`<-ch`
 - slice/array 索引表达式：`xs[i]` 生成 `arr.get(xs, i)`。
-- map 单值索引表达式：`m[k]` 生成 `m.value(m, k)`。
-- map 双值索引表达式：`v, ok := m[k]` 生成 `m.get(m, k)`。
+- map 单值索引表达式：`dict[k]` 生成 `map.value(dict, k)`。
+- map 双值索引表达式：`v, ok := dict[k]` 生成 `map.get(dict, k)`。
 - 切片表达式：`xs[a:b]` 生成 `arr.slice(xs, a, b)`。
 - 取址输出参数：`&ident` 生成 `out`。
 - 取址输出参数：`&selector` 生成带路径的 `out`。
@@ -170,7 +170,7 @@
 - `int64(v)`
 - `len(xs)` 生成 `arr.len(xs)`
 - `append(xs, v)` 在 `xs = append(xs, v)` 中生成 `arr.push(xs, v)`
-- `delete(m, k)` 生成 `m.del(m, k)`
+- `delete(dict, k)` 生成 `map.del(dict, k)`
 - `cap(ch)` 生成 `ch.cap(ch)`，`cap(xs)` 生成 `arr.len(xs)`
 - `new(T)` 生成 `ptr.new("T")`
 - `copy(dst, src)` 生成 `copy(dst, src)`

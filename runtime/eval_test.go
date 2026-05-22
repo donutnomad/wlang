@@ -157,3 +157,34 @@ func TestTC104_NullLiteral(t *testing.T) {
 		t.Fatalf("want nil Go, got %v", v.Go())
 	}
 }
+
+func TestMapNamespaceBuiltins(t *testing.T) {
+	src := `[{
+		"let":{"labels":{"map":{"type":["string","int64"],"value":{
+			"a":{"literal":{"type":"int64","value":"1"}}
+		}}}}
+	},{
+		"expr":{"map.set":[
+			{"var":"labels"},
+			{"literal":{"type":"string","value":"b"}},
+			{"literal":{"type":"int64","value":"2"}}
+		]}
+	},{
+		"expr":{"map.del":[
+			{"var":"labels"},
+			{"literal":{"type":"string","value":"a"}}
+		]}
+	},{
+		"return":{"map.value":[
+			{"var":"labels"},
+			{"literal":{"type":"string","value":"b"}}
+		]}
+	}]`
+	v, err := runSrc(t, src)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != types.TInt64 || v.Go().(int64) != 2 {
+		t.Fatalf("want int64=2, got %s=%v", v.TypeName(), v.Go())
+	}
+}

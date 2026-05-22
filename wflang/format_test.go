@@ -139,3 +139,70 @@ func TestFormatPseudoCode_ReceiverCallChainUsesDotSyntax(t *testing.T) {
 		t.Fatalf("pseudo code mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
 	}
 }
+
+func TestFormatPseudoCode_ArrayBuiltinSugar(t *testing.T) {
+	src := []byte(`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"let":{"n":{"arr.len":[{"var":"scores"}]}}},
+	    {"let":{"item":{"arr.get":[{"var":"scores"},{"var":"idx"}]}}},
+	    {"expr":{"arr.set":[
+	      {"var":"scores"},
+	      {"literal":{"type":"int64","value":"0"}},
+	      {"var":"n"}
+	    ]}},
+	    {"let":{"part":{"arr.slice":[
+	      {"var":"scores"},
+	      {"literal":{"type":"int64","value":"1"}},
+	      {"literal":{"type":"int64","value":"3"}}
+	    ]}}}
+	  ]
+	}`)
+	out, err := wflang.FormatPseudoCode(src)
+	if err != nil {
+		t.Fatalf("format pseudo: %v", err)
+	}
+	got := string(out)
+	want := strings.Join([]string{
+		"let n = scores.length",
+		"let item = scores[idx]",
+		"scores[0] = n",
+		"let part = scores[1:3]",
+	}, "\n")
+	if got != want {
+		t.Fatalf("pseudo code mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
+func TestFormatPseudoCode_MapBuiltinSugar(t *testing.T) {
+	src := []byte(`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"let":[["val","ok"],{"map.get":[{"var":"labels"},{"literal":{"type":"string","value":"primary"}}]}]},
+	    {"let":{"current":{"map.value":[{"var":"labels"},{"literal":{"type":"string","value":"copy"}}]}}},
+	    {"expr":{"map.set":[
+	      {"var":"labels"},
+	      {"literal":{"type":"string","value":"copy"}},
+	      {"var":"val"}
+	    ]}},
+	    {"expr":{"map.del":[
+	      {"var":"labels"},
+	      {"literal":{"type":"string","value":"primary"}}
+	    ]}}
+	  ]
+	}`)
+	out, err := wflang.FormatPseudoCode(src)
+	if err != nil {
+		t.Fatalf("format pseudo: %v", err)
+	}
+	got := string(out)
+	want := strings.Join([]string{
+		"let val, ok = labels[\"primary\"]",
+		"let current = labels[\"copy\"]",
+		"labels[\"copy\"] = val",
+		"delete(labels, \"primary\")",
+	}, "\n")
+	if got != want {
+		t.Fatalf("pseudo code mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}

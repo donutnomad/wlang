@@ -37,7 +37,7 @@ func Rule(xs []int64, flag bool) int64 {
 }
 `)
 	for _, needle := range []string{
-		"let n = arr.len(xs)",
+		"let n = xs.length",
 		"if n > 0 {",
 		"} else {",
 		"if flag {",
@@ -85,10 +85,10 @@ func Rule(m map[string]int64, xs []int64, p *int64) int64 {
 }
 `)
 	for _, needle := range []string{
-		"let v, ok = m.get(m, \"a\")",
-		"m.set(m, \"b\", 0 - v)",
-		"arr.set(xs, 0, v)",
-		"arr.slice(xs, 1, 3)",
+		"let v, ok = m[\"a\"]",
+		"m[\"b\"] = 0 - v",
+		"xs[0] = v",
+		"xs[1:3]",
 		"return ptr.deref(p)",
 	} {
 		if !strings.Contains(got, needle) {
@@ -117,7 +117,7 @@ func Rule(x any, ch chan string) string {
 		"routine {",
 		"let v = \"done\"",
 		"ch.send(ch, v)",
-		"m.del(map<string,string> {",
+		"delete(map<string,string> {",
 	} {
 		if !strings.Contains(got, needle) {
 			t.Fatalf("missing %q in:\n%s", needle, got)
