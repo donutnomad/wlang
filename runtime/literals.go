@@ -255,6 +255,30 @@ func mapGet(e *Executor, c *ast.Call) (types.Value, error) {
 		[]any{got.Interface(), true}), nil
 }
 
+func mapValue(e *Executor, c *ast.Call) (types.Value, error) {
+	rv, _, valType, err := argMap(c, e)
+	if err != nil {
+		return types.Value{}, err
+	}
+	if len(c.Args) != 2 {
+		return types.Value{}, werr.Newf(werr.CodeASTShape,
+			"m.value expects (map, key), got %d args", len(c.Args)).WithPath(c.Path())
+	}
+	kv, err := e.Eval(c.Args[1])
+	if err != nil {
+		return types.Value{}, err
+	}
+	rk, err := coerceToReflect(kv, rv.Type().Key())
+	if err != nil {
+		return types.Value{}, werr.Newf(werr.CodeType, "m.value key: %v", err).WithPath(c.Path())
+	}
+	got := rv.MapIndex(rk)
+	if !got.IsValid() {
+		return types.NewValue(valType, reflect.Zero(rv.Type().Elem()).Interface()), nil
+	}
+	return types.NewValue(valType, got.Interface()), nil
+}
+
 func mapSet(e *Executor, c *ast.Call) (types.Value, error) {
 	rv, _, _, err := argMap(c, e)
 	if err != nil {

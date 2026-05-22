@@ -4,6 +4,7 @@ package registry
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync"
 
 	werr "github.com/donutnomad/wlang/errors"
@@ -52,6 +53,7 @@ type Registry struct {
 	mu       sync.RWMutex
 	packages map[string]*boundPackage
 	types    map[string]*boundType
+	symbols  map[string]types.Value
 }
 
 // New returns an empty Registry.
@@ -59,6 +61,7 @@ func New() *Registry {
 	return &Registry{
 		packages: map[string]*boundPackage{},
 		types:    map[string]*boundType{},
+		symbols:  map[string]types.Value{},
 	}
 }
 
@@ -195,6 +198,12 @@ func scoreCandidate(bf *boundFunc, args []types.Value) (int, bool) {
 // matchScore returns the match priority between an arg and a target Go type.
 // 100 exact, 80 numeric promotion, 60 precision promotion, 40 convertible, 10 any.
 func matchScore(a types.Value, tgt reflect.Type) (int, bool) {
+	if _, ok := a.Go().(*types.OutArg); ok && a.TypeName() == types.TOut {
+		if tgt.Kind() == reflect.Pointer || tgt.Kind() == reflect.Interface {
+			return 80, true
+		}
+		return 0, false
+	}
 	// any target: priority 10.
 	if tgt.Kind() == reflect.Interface && tgt.NumMethod() == 0 {
 		return 10, true
@@ -275,6 +284,296 @@ func (r *Registry) PackageNames() map[string]any {
 		out[k] = struct{}{}
 	}
 	return out
+}
+
+// BindSymbol registers a static Go symbol value such as "pkg.Func".
+func (r *Registry) BindSymbol(name string, value any) error {
+	if name == "" {
+		return werr.New(werr.CodeASTShape, "BindSymbol: empty name")
+	}
+	v, err := symbolValue(name, value)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.symbols[name]; ok {
+		return werr.Newf(werr.CodeASTShape, "symbol %q already registered", name)
+	}
+	r.symbols[name] = v
+	return nil
+}
+
+// ResolveSymbol returns the value bound to a static symbol.
+func (r *Registry) ResolveSymbol(name, path string) (types.Value, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.symbols[name]
+	if !ok {
+		return types.Value{}, werr.Newf(werr.CodeSymbol,
+			"symbol %q not found", name).WithPath(path)
+	}
+	return v, nil
+}
+
+// ZeroValue returns the typed Go zero value for a primitive or registered type.
+func (r *Registry) ZeroValue(typeName, path string) (types.Value, error) {
+	if v, ok := primitiveZero(typeName); ok {
+		return v, nil
+	}
+	if strings.HasPrefix(typeName, "array<") && strings.HasSuffix(typeName, ">") {
+		return types.NewArray(typeName[6:len(typeName)-1], nil)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	bt, ok := r.types[typeName]
+	if !ok || bt.rt == nil {
+		return types.Value{}, werr.Newf(werr.CodeSymbol,
+			"type %q not registered", typeName).WithPath(path)
+	}
+	return types.NewValue(typeName, reflect.Zero(bt.rt).Interface()), nil
+}
+
+// CallValue invokes a Go function carrier through the same reflection path as
+// host package and method calls.
+func (r *Registry) CallValue(ctx context.Context, fn types.Value,
+	args []types.Value, path string) (types.Value, error) {
+	g := fn.Go()
+	if g == nil {
+		return types.Value{}, werr.Newf(werr.CodeType,
+			"call.fn must be Go function, got %s", fn.TypeName()).WithPath(path)
+	}
+	rv := reflect.ValueOf(g)
+	if !rv.IsValid() || rv.Kind() != reflect.Func {
+		return types.Value{}, werr.Newf(werr.CodeType,
+			"call.fn must be Go function, got %s", fn.TypeName()).WithPath(path)
+	}
+	bf, err := bindOne(fn.TypeName(), g, false, nil)
+	if err != nil {
+		return types.Value{}, err
+	}
+	return bf.call(ctx, nil, args, path)
+}
+
+// BindMethodValue returns a receiver-bound Go function value for
+// {"method":[receiver,"Name"]}. Registered receiver types honor Include,
+// Exclude, and capability rules before the method value is created.
+func (r *Registry) BindMethodValue(ctx context.Context, recv types.Value, name, path string) (types.Value, error) {
+	if recv.IsNull() || recv.Go() == nil {
+		return types.Value{}, werr.Newf(werr.CodeNilReceiver,
+			"receiver is null for method value %q", name).WithPath(path)
+	}
+
+	r.mu.RLock()
+	bt, ok := r.lookupBoundTypeForReceiver(recv)
+	if !ok {
+		r.mu.RUnlock()
+		return reflectMethodValue(recv, name, path)
+	}
+	fn, found := bt.methods[name]
+	excluded := bt.excluded[name]
+	r.mu.RUnlock()
+
+	if !found {
+		if excluded {
+			return types.Value{}, werr.Newf(werr.CodeSymbol,
+				"method %q is not bound on %s (excluded by BindOptions)",
+				name, recv.TypeName()).WithPath(path)
+		}
+		return types.Value{}, werr.Newf(werr.CodeSymbol,
+			"method %q not found on %s", name, recv.TypeName()).WithPath(path)
+	}
+	if err := checkCaps(ctx, fn.name, fn.capability, path); err != nil {
+		return types.Value{}, err
+	}
+	return makeBoundMethodValue(ctx, recv, fn, path)
+}
+
+func (r *Registry) lookupBoundTypeForReceiver(recv types.Value) (*boundType, bool) {
+	seen := map[string]bool{}
+	names := []string{recv.TypeName()}
+	if g := recv.Go(); g != nil {
+		rt := reflect.TypeOf(g)
+		names = append(names, types.AutoHostTypeName(rt))
+		if rt.Kind() == reflect.Pointer {
+			names = append(names, types.AutoHostTypeName(rt.Elem()))
+		} else {
+			names = append(names, types.AutoHostTypeName(reflect.PointerTo(rt)))
+		}
+	}
+	for _, name := range names {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if bt, ok := r.types[name]; ok {
+			return bt, true
+		}
+	}
+	return nil, false
+}
+
+func makeBoundMethodValue(ctx context.Context, recv types.Value, fn *boundFunc, path string) (types.Value, error) {
+	if fn.impl.Type().NumIn() == 0 {
+		return types.Value{}, werr.Newf(werr.CodeType,
+			"method %q has no receiver parameter", fn.name).WithPath(path)
+	}
+	receiver, err := bindReceiverValue(recv, fn.impl.Type().In(0))
+	if err != nil {
+		return types.Value{}, err.WithPath(path)
+	}
+	inTypes := append([]reflect.Type(nil), fn.inTypes...)
+	outTypes := append([]reflect.Type(nil), fn.outTypes...)
+	ft := reflect.FuncOf(inTypes, outTypes, fn.variadic)
+	wrapper := reflect.MakeFunc(ft, func(args []reflect.Value) []reflect.Value {
+		in := []reflect.Value{receiver}
+		if fn.wantsCtx {
+			in = append(in, reflect.ValueOf(ctx))
+		}
+		if fn.wantsEnv {
+			in = append(in, reflect.ValueOf(Env{Caps: capsFromCtx(ctx), Path: path}))
+		}
+		in = append(in, args...)
+		if fn.variadic && len(in) == fn.impl.Type().NumIn() &&
+			in[len(in)-1].Type().AssignableTo(fn.impl.Type().In(fn.impl.Type().NumIn()-1)) {
+			return fn.impl.CallSlice(in)
+		}
+		return fn.impl.Call(in)
+	})
+	return types.NewValue(funcTypeName(fn), wrapper.Interface()), nil
+}
+
+func bindReceiverValue(recv types.Value, target reflect.Type) (reflect.Value, *werr.LangError) {
+	if recv.Go() == nil {
+		return reflect.Value{}, werr.Newf(werr.CodeNilReceiver,
+			"receiver is null for method value %q", recv.TypeName())
+	}
+	rv := reflect.ValueOf(recv.Go())
+	if !rv.IsValid() {
+		return reflect.Value{}, werr.Newf(werr.CodeNilReceiver,
+			"receiver is null for method value %q", recv.TypeName())
+	}
+	if rv.Type().AssignableTo(target) {
+		return rv, nil
+	}
+	if rv.Type().ConvertibleTo(target) {
+		return rv.Convert(target), nil
+	}
+	if target.Kind() == reflect.Pointer {
+		elem := target.Elem()
+		if rv.Type().AssignableTo(elem) {
+			ptr := reflect.New(elem)
+			ptr.Elem().Set(rv)
+			return ptr, nil
+		}
+		if rv.Type().ConvertibleTo(elem) {
+			ptr := reflect.New(elem)
+			ptr.Elem().Set(rv.Convert(elem))
+			return ptr, nil
+		}
+	}
+	if rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		elem := rv.Elem()
+		if elem.Type().AssignableTo(target) {
+			return elem, nil
+		}
+		if elem.Type().ConvertibleTo(target) {
+			return elem.Convert(target), nil
+		}
+	}
+	return reflect.Value{}, werr.Newf(werr.CodeType,
+		"receiver %s cannot bind method receiver %s", recv.TypeName(), target)
+}
+
+func reflectMethodValue(recv types.Value, name, path string) (types.Value, error) {
+	if recv.IsNull() || recv.Go() == nil {
+		return types.Value{}, werr.Newf(werr.CodeNilReceiver,
+			"receiver is null for method value %q", name).WithPath(path)
+	}
+	rv := reflect.ValueOf(recv.Go())
+	if !rv.IsValid() {
+		return types.Value{}, werr.Newf(werr.CodeNilReceiver,
+			"receiver is null for method value %q", name).WithPath(path)
+	}
+	mv := rv.MethodByName(name)
+	if !mv.IsValid() && rv.Kind() != reflect.Pointer {
+		ptr := reflect.New(rv.Type())
+		ptr.Elem().Set(rv)
+		mv = ptr.MethodByName(name)
+	}
+	if !mv.IsValid() {
+		return types.Value{}, werr.Newf(werr.CodeSymbol,
+			"method %q not found on %s", name, recv.TypeName()).WithPath(path)
+	}
+	bf, err := bindOne(name, mv.Interface(), false, nil)
+	if err != nil {
+		return types.Value{}, err
+	}
+	return types.NewValue(funcTypeName(bf), mv.Interface()), nil
+}
+
+func symbolValue(name string, value any) (types.Value, error) {
+	if v, ok := value.(types.Value); ok {
+		return v, nil
+	}
+	if value == nil {
+		v, _ := types.NewNull()
+		return v, nil
+	}
+	rv := reflect.ValueOf(value)
+	if rv.IsValid() && rv.Kind() == reflect.Func {
+		bf, err := bindOne(name, value, false, nil)
+		if err != nil {
+			return types.Value{}, err
+		}
+		return types.NewValue(funcTypeName(bf), value), nil
+	}
+	return wrapResult(rv), nil
+}
+
+func funcTypeName(bf *boundFunc) string {
+	params := make([]string, 0, len(bf.inTypes))
+	returns := make([]string, 0, len(bf.outTypes))
+	for _, t := range bf.inTypes {
+		params = append(params, reflectToTypeName(t))
+	}
+	for _, t := range bf.outTypes {
+		returns = append(returns, reflectToTypeName(t))
+	}
+	return types.FuncType(params, returns)
+}
+
+func primitiveZero(typeName string) (types.Value, bool) {
+	switch typeName {
+	case types.TString:
+		return types.NewValue(types.TString, ""), true
+	case types.TBoolean:
+		return types.NewValue(types.TBoolean, false), true
+	case types.TInt8:
+		return types.NewValue(types.TInt8, int8(0)), true
+	case types.TInt16:
+		return types.NewValue(types.TInt16, int16(0)), true
+	case types.TInt32:
+		return types.NewValue(types.TInt32, int32(0)), true
+	case types.TInt64:
+		return types.NewValue(types.TInt64, int64(0)), true
+	case types.TUint8:
+		return types.NewValue(types.TUint8, uint8(0)), true
+	case types.TUint16:
+		return types.NewValue(types.TUint16, uint16(0)), true
+	case types.TUint32:
+		return types.NewValue(types.TUint32, uint32(0)), true
+	case types.TUint64:
+		return types.NewValue(types.TUint64, uint64(0)), true
+	case types.TFloat32:
+		return types.NewValue(types.TFloat32, float32(0)), true
+	case types.TFloat64:
+		return types.NewValue(types.TFloat64, float64(0)), true
+	case types.TNull:
+		v, _ := types.NewNull()
+		return v, true
+	}
+	return types.Value{}, false
 }
 
 // HasOverloads reports whether op has more than one candidate registered
@@ -884,6 +1183,9 @@ func (bf *boundFunc) call(ctx context.Context, recv *types.Value,
 			"%q expects %d args, got %d", bf.name, expected, len(args)).WithPath(path)
 	}
 
+	var outArgs []*preparedOutArg
+	outByName := map[string]*preparedOutArg{}
+	queuedOut := map[string]bool{}
 	for i, a := range args {
 		var target reflect.Type
 		if bf.variadic && i >= expected-1 {
@@ -891,10 +1193,14 @@ func (bf *boundFunc) call(ctx context.Context, recv *types.Value,
 		} else {
 			target = bf.inTypes[i]
 		}
-		rv, err := coerce(a, target)
+		rv, outArg, err := coerceArg(a, target, outByName)
 		if err != nil {
 			return types.Value{}, werr.Newf(werr.CodeType,
 				"%q arg %d: %v", bf.name, i, err).WithPath(path)
+		}
+		if outArg != nil && !queuedOut[outArg.arg.Name] {
+			outArgs = append(outArgs, outArg)
+			queuedOut[outArg.arg.Name] = true
 		}
 		in = append(in, rv)
 	}
@@ -902,6 +1208,14 @@ func (bf *boundFunc) call(ctx context.Context, recv *types.Value,
 	out, panicErr := safeCall(bf.impl, in, bf.name, path)
 	if panicErr != nil {
 		return types.Value{}, panicErr
+	}
+	for _, outArg := range outArgs {
+		if err := outArg.commit(); err != nil {
+			if le, ok := err.(*werr.LangError); ok {
+				return types.Value{}, le.WithPath(path)
+			}
+			return types.Value{}, err
+		}
 	}
 	// Result shapes (Go-style explicit error returns, no auto short-circuit):
 	//   ()                          → null
@@ -1000,6 +1314,112 @@ func wrapResult(v reflect.Value) types.Value {
 	}
 	// Auto host type.
 	return types.NewValue(types.AutoHostTypeName(v.Type()), g)
+}
+
+type preparedOutArg struct {
+	arg *types.OutArg
+	ptr reflect.Value
+}
+
+func (p preparedOutArg) commit() error {
+	elem := p.ptr.Elem()
+	var next types.Value
+	if p.arg.TypeName != "" {
+		next = types.NewValue(p.arg.TypeName, elem.Interface())
+	} else {
+		next = wrapResult(elem)
+	}
+	if p.arg.Commit == nil {
+		return werr.Newf(werr.CodeRuntime, "out %q has no commit hook", p.arg.Name)
+	}
+	if err := p.arg.Commit(next); err != nil {
+		if le, ok := err.(*werr.LangError); ok {
+			return le
+		}
+		return err
+	}
+	return nil
+}
+
+// coerceArg converts a typed Value into a reflect.Value of target type.
+func coerceArg(v types.Value, target reflect.Type, outByName map[string]*preparedOutArg) (reflect.Value, *preparedOutArg, error) {
+	if out, ok := v.Go().(*types.OutArg); ok && v.TypeName() == types.TOut {
+		rv, prepared, err := prepareOutArg(out, target, outByName)
+		return rv, prepared, err
+	}
+	rv, err := coerce(v, target)
+	return rv, nil, err
+}
+
+func prepareOutArg(out *types.OutArg, target reflect.Type, outByName map[string]*preparedOutArg) (reflect.Value, *preparedOutArg, error) {
+	if target.Kind() != reflect.Pointer && target.Kind() != reflect.Interface {
+		return reflect.Value{}, nil, werr.Newf(werr.CodeType,
+			"out %q requires pointer or interface target, got %s", out.Name, target)
+	}
+	if outByName != nil {
+		if prepared, ok := outByName[out.Name]; ok {
+			rv, err := prepared.valueForTarget(target)
+			return rv, prepared, err
+		}
+	}
+	cur := out.Current
+	curVal := reflect.Value{}
+	if cur.Go() != nil {
+		curVal = reflect.ValueOf(cur.Go())
+	}
+	var elemType reflect.Type
+	if target.Kind() == reflect.Pointer {
+		elemType = target.Elem()
+	} else {
+		if !curVal.IsValid() {
+			return reflect.Value{}, nil, werr.Newf(werr.CodeType,
+				"out %q passed to interface target requires a typed current value", out.Name)
+		}
+		elemType = curVal.Type()
+	}
+	ptr := reflect.New(elemType)
+	if curVal.IsValid() {
+		if curVal.Type().AssignableTo(elemType) {
+			ptr.Elem().Set(curVal)
+		} else if curVal.Type().ConvertibleTo(elemType) {
+			ptr.Elem().Set(curVal.Convert(elemType))
+		} else {
+			return reflect.Value{}, nil, werr.Newf(werr.CodeType,
+				"out %q current value %s cannot initialize %s",
+				out.Name, cur.TypeName(), elemType)
+		}
+	}
+	if target.Kind() == reflect.Interface {
+		if !ptr.Type().AssignableTo(target) {
+			return reflect.Value{}, nil, werr.Newf(werr.CodeType,
+				"out %q pointer %s cannot satisfy %s", out.Name, ptr.Type(), target)
+		}
+		prepared := &preparedOutArg{arg: out, ptr: ptr}
+		if outByName != nil {
+			outByName[out.Name] = prepared
+		}
+		return ptr, prepared, nil
+	}
+	prepared := &preparedOutArg{arg: out, ptr: ptr}
+	if outByName != nil {
+		outByName[out.Name] = prepared
+	}
+	return ptr, prepared, nil
+}
+
+func (p *preparedOutArg) valueForTarget(target reflect.Type) (reflect.Value, error) {
+	if target.Kind() != reflect.Pointer && target.Kind() != reflect.Interface {
+		return reflect.Value{}, werr.Newf(werr.CodeType,
+			"out %q requires pointer or interface target, got %s", p.arg.Name, target)
+	}
+	if p.ptr.Type().AssignableTo(target) {
+		return p.ptr, nil
+	}
+	if target.Kind() == reflect.Interface && p.ptr.Type().Implements(target) {
+		return p.ptr, nil
+	}
+	return reflect.Value{}, werr.Newf(werr.CodeType,
+		"out %q pointer %s cannot satisfy %s", p.arg.Name, p.ptr.Type(), target)
 }
 
 // coerce converts a typed Value into a reflect.Value of target type.

@@ -37,6 +37,33 @@ type Pkg struct {
 	Name string
 }
 
+// Symbol represents a static Go symbol value `{"symbol":"pkg.Func"}`.
+type Symbol struct {
+	Base
+	Name string
+}
+
+// MethodValue represents a receiver-bound method value
+// `{"method":[receiverExpr,"Method"]}`.
+type MethodValue struct {
+	Base
+	Receiver Node
+	Name     string
+}
+
+// Out represents a Go address output argument `{"out":"name"}`. It is valid
+// only inside function/host call argument lists.
+type Out struct {
+	Base
+	Name string
+}
+
+// Zero creates the typed Go zero value for a registered type.
+type Zero struct {
+	Base
+	TypeName string
+}
+
 // Call is a JSONLogic operator invocation (§3.2).
 // Key holds the operator name (e.g. "+", "Len", "Run").
 // Args is the argument list. For method/package calls the first arg is the receiver.

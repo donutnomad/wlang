@@ -216,6 +216,8 @@ func astWalkChildren(n ast.Node, fn func(ast.Node)) {
 		if x.Default != nil {
 			fn(x.Default)
 		}
+	case *ast.MethodValue:
+		fn(x.Receiver)
 	case *ast.Array:
 		for _, it := range x.Items {
 			fn(it)

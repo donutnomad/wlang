@@ -113,7 +113,205 @@ func (s *Scope) Set(name string, v types.Value) error {
 			return nil
 		}
 	}
+	if strings.Contains(name, ".") {
+		return s.setPath(name, v)
+	}
 	return werr.Newf(werr.CodeSymbol, "variable %q not defined", name)
+}
+
+func (s *Scope) setPath(path string, v types.Value) error {
+	segs := strings.Split(path, ".")
+	if len(segs) < 2 || segs[0] == "" {
+		return werr.Newf(werr.CodeSymbol, "variable path %q not defined", path)
+	}
+	for cur := s; cur != nil; cur = cur.parent {
+		if b, ok := cur.vars[segs[0]]; ok {
+			if !b.writable {
+				return werr.Newf(werr.CodeReadonlyVar,
+					"cannot assign to read-only variable %q", segs[0])
+			}
+			next, err := setGoPath(b.val.Go(), segs[1:], v.Go())
+			if err != nil {
+				return err
+			}
+			b.val = types.NewValue(b.val.TypeName(), next)
+			return nil
+		}
+	}
+	return werr.Newf(werr.CodeSymbol, "variable %q not defined", segs[0])
+}
+
+func setGoPath(root any, segs []string, next any) (any, error) {
+	if len(segs) == 0 {
+		return next, nil
+	}
+	if root == nil {
+		return nil, werr.New(werr.CodeNilReceiver, "cannot assign through nil value")
+	}
+	rv := reflect.ValueOf(root)
+	updated, err := setReflectPath(rv, segs, next)
+	if err != nil {
+		return nil, err
+	}
+	return updated.Interface(), nil
+}
+
+func setReflectPath(rv reflect.Value, segs []string, next any) (reflect.Value, error) {
+	for rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return reflect.Value{}, werr.New(werr.CodeNilReceiver, "cannot assign through nil interface")
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return reflect.Value{}, werr.New(werr.CodeNilReceiver, "cannot assign through nil pointer")
+		}
+		if len(segs) == 0 {
+			if err := assignReflect(rv, next); err != nil {
+				return reflect.Value{}, err
+			}
+			return rv, nil
+		}
+		_, err := setReflectPath(rv.Elem(), segs, next)
+		return rv, err
+	}
+	if len(segs) == 0 {
+		if !rv.CanSet() {
+			copy := reflect.New(rv.Type()).Elem()
+			copy.Set(rv)
+			rv = copy
+		}
+		if err := assignReflect(rv, next); err != nil {
+			return reflect.Value{}, err
+		}
+		return rv, nil
+	}
+	if !rv.CanSet() {
+		copy := reflect.New(rv.Type()).Elem()
+		copy.Set(rv)
+		rv = copy
+	}
+	seg := segs[0]
+	switch rv.Kind() {
+	case reflect.Struct:
+		field := structFieldByPathSegment(rv, seg)
+		if !field.IsValid() {
+			return reflect.Value{}, werr.Newf(werr.CodeSymbol, "field %q not found", seg)
+		}
+		if len(segs) == 1 {
+			if err := assignReflect(field, next); err != nil {
+				return reflect.Value{}, err
+			}
+			return rv, nil
+		}
+		updated, err := setReflectPath(field, segs[1:], next)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if field.CanSet() && updated.Type().AssignableTo(field.Type()) {
+			field.Set(updated)
+		}
+		return rv, nil
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			return reflect.Value{}, werr.Newf(werr.CodeType, "map path key must be string, got %s", rv.Type().Key())
+		}
+		key := reflect.ValueOf(seg).Convert(rv.Type().Key())
+		if len(segs) == 1 {
+			val, err := reflectValueFor(next, rv.Type().Elem())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			rv.SetMapIndex(key, val)
+			return rv, nil
+		}
+		cur := rv.MapIndex(key)
+		if !cur.IsValid() {
+			return reflect.Value{}, werr.Newf(werr.CodeSymbol, "map key %q not found", seg)
+		}
+		updated, err := setReflectPath(cur, segs[1:], next)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if updated.Type().AssignableTo(rv.Type().Elem()) {
+			rv.SetMapIndex(key, updated)
+		}
+		return rv, nil
+	case reflect.Slice, reflect.Array:
+		idx, err := strconv.Atoi(seg)
+		if err != nil || idx < 0 || idx >= rv.Len() {
+			return reflect.Value{}, werr.Newf(werr.CodeRuntime, "index %q out of range", seg)
+		}
+		elem := rv.Index(idx)
+		if len(segs) == 1 {
+			if err := assignReflect(elem, next); err != nil {
+				return reflect.Value{}, err
+			}
+			return rv, nil
+		}
+		_, err = setReflectPath(elem, segs[1:], next)
+		return rv, err
+	}
+	return reflect.Value{}, werr.Newf(werr.CodeType, "cannot assign through %s", rv.Kind())
+}
+
+func structFieldByPathSegment(rv reflect.Value, seg string) reflect.Value {
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		tag := sf.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		if strings.SplitN(tag, ",", 2)[0] == seg {
+			return rv.Field(i)
+		}
+	}
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		if sf.Name == seg && strings.SplitN(sf.Tag.Get("json"), ",", 2)[0] != "-" {
+			return rv.Field(i)
+		}
+	}
+	return reflect.Value{}
+}
+
+func assignReflect(dst reflect.Value, next any) error {
+	val, err := reflectValueFor(next, dst.Type())
+	if err != nil {
+		return err
+	}
+	if !dst.CanSet() {
+		return werr.Newf(werr.CodeReadonlyVar, "cannot assign to non-settable %s", dst.Type())
+	}
+	dst.Set(val)
+	return nil
+}
+
+func reflectValueFor(next any, target reflect.Type) (reflect.Value, error) {
+	if next == nil {
+		switch target.Kind() {
+		case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+			return reflect.Zero(target), nil
+		default:
+			return reflect.Value{}, werr.Newf(werr.CodeType, "cannot assign null to %s", target)
+		}
+	}
+	val := reflect.ValueOf(next)
+	if val.Type().AssignableTo(target) {
+		return val, nil
+	}
+	if val.Type().ConvertibleTo(target) {
+		return val.Convert(target), nil
+	}
+	return reflect.Value{}, werr.Newf(werr.CodeType, "cannot assign %s to %s", val.Type(), target)
 }
 
 // Lookup looks up a variable (without descending into paths).
@@ -124,6 +322,16 @@ func (s *Scope) Lookup(name string) (types.Value, bool) {
 		}
 	}
 	return types.Value{}, false
+}
+
+// LookupBinding returns the value and assignment permission for a variable.
+func (s *Scope) LookupBinding(name string) (types.Value, bool, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		if b, ok := cur.vars[name]; ok {
+			return b.val, b.writable, true
+		}
+	}
+	return types.Value{}, false, false
 }
 
 // LookupPath evaluates a dotted path against the current scope (§2.3).

@@ -23,6 +23,15 @@ func (e *Executor) Eval(n ast.Node) (types.Value, error) {
 		return e.evalVar(x)
 	case *ast.Pkg:
 		return e.evalPkg(x)
+	case *ast.Symbol:
+		return e.evalSymbol(x)
+	case *ast.MethodValue:
+		return e.evalMethodValue(x)
+	case *ast.Out:
+		return types.Value{}, werr.New(werr.CodeASTShape,
+			"out is only valid as a call argument").WithPath(x.Path())
+	case *ast.Zero:
+		return e.evalZero(x)
 	case *ast.Array:
 		return e.evalArray(x)
 	case *ast.FuncLit:
@@ -71,6 +80,46 @@ func (e *Executor) evalPkg(p *ast.Pkg) (types.Value, error) {
 	}
 	// Package receivers carry a sentinel type name.
 	return types.NewValue(pkgTypeName, pkgRef{Name: p.Name}), nil
+}
+
+func (e *Executor) evalSymbol(s *ast.Symbol) (types.Value, error) {
+	if e.registry == nil {
+		return types.Value{}, werr.New(werr.CodeSymbol,
+			"no registry available for symbol").WithPath(s.Path())
+	}
+	return e.registry.ResolveSymbol(s.Name, s.Path())
+}
+
+func (e *Executor) evalMethodValue(m *ast.MethodValue) (types.Value, error) {
+	recv, err := e.Eval(m.Receiver)
+	if err != nil {
+		return types.Value{}, err
+	}
+	if e.registry != nil {
+		return e.registry.BindMethodValue(e.ctx, recv, m.Name, m.Path())
+	}
+	if recv.IsNull() {
+		return types.Value{}, werr.Newf(werr.CodeNilReceiver,
+			"receiver is null for method value %q", m.Name).WithPath(m.Path())
+	}
+	rv := reflect.ValueOf(recv.Go())
+	if !rv.IsValid() {
+		return types.Value{}, werr.Newf(werr.CodeNilReceiver,
+			"receiver is null for method value %q", m.Name).WithPath(m.Path())
+	}
+	mv := rv.MethodByName(m.Name)
+	if !mv.IsValid() {
+		return types.Value{}, werr.Newf(werr.CodeSymbol,
+			"method %q not found on %s", m.Name, recv.TypeName()).WithPath(m.Path())
+	}
+	return types.NewValue(funcTypeName(mv.Type()), mv.Interface()), nil
+}
+
+func (e *Executor) evalZero(z *ast.Zero) (types.Value, error) {
+	if e.registry == nil {
+		return zeroPrimitive(z.TypeName, z.Path())
+	}
+	return e.registry.ZeroValue(z.TypeName, z.Path())
 }
 
 // pkgRef is a runtime marker for package receivers.
@@ -223,7 +272,7 @@ func (e *Executor) prepareHostCall(c *ast.Call) (preparedHostCall, error) {
 		return preparedHostCall{}, werr.Newf(werr.CodeASTShape,
 			"call %q requires at least a receiver argument", c.Op).WithPath(c.Path())
 	}
-	recv, err := e.Eval(c.Args[0])
+	recv, err := e.prepareCallArg(c.Args[0])
 	if err != nil {
 		return preparedHostCall{}, err
 	}
@@ -234,7 +283,7 @@ func (e *Executor) prepareHostCall(c *ast.Call) (preparedHostCall, error) {
 	// Evaluate remaining arguments.
 	args := make([]types.Value, 0, len(c.Args)-1)
 	for _, a := range c.Args[1:] {
-		av, err := e.Eval(a)
+		av, err := e.prepareCallArg(a)
 		if err != nil {
 			return preparedHostCall{}, err
 		}
@@ -247,6 +296,125 @@ func (e *Executor) invokePreparedHostCall(c preparedHostCall) (types.Value, erro
 	return e.registry.Invoke(e.ctx, c.op, c.recv, c.args, c.path)
 }
 
+func (e *Executor) prepareCallArg(n ast.Node) (types.Value, error) {
+	if out, ok := n.(*ast.Out); ok {
+		rootName := out.Name
+		if i := strings.IndexByte(rootName, '.'); i >= 0 {
+			rootName = rootName[:i]
+		}
+		v, writable, found := e.scope.LookupBinding(rootName)
+		if !found {
+			return types.Value{}, werr.Newf(werr.CodeSymbol,
+				"out variable %q not found", out.Name).WithPath(out.Path())
+		}
+		if !writable {
+			return types.Value{}, werr.Newf(werr.CodeReadonlyVar,
+				"cannot assign to read-only variable %q", out.Name).WithPath(out.Path())
+		}
+		if rootName != out.Name {
+			pathValue, ok := e.scope.LookupPath(out.Name)
+			if !ok {
+				return types.Value{}, werr.Newf(werr.CodeSymbol,
+					"out variable path %q not found", out.Name).WithPath(out.Path())
+			}
+			v = pathValue
+		}
+		scope := e.scope
+		arg := &types.OutArg{
+			Name:     out.Name,
+			TypeName: v.TypeName(),
+			Current:  v,
+			Commit: func(next types.Value) error {
+				return scope.Set(out.Name, next)
+			},
+		}
+		return types.NewValue(types.TOut, arg), nil
+	}
+	return e.Eval(n)
+}
+
+func zeroPrimitive(typeName, path string) (types.Value, error) {
+	switch typeName {
+	case types.TString:
+		return types.NewValue(types.TString, ""), nil
+	case types.TBoolean:
+		return types.NewValue(types.TBoolean, false), nil
+	case types.TInt8:
+		return types.NewValue(types.TInt8, int8(0)), nil
+	case types.TInt16:
+		return types.NewValue(types.TInt16, int16(0)), nil
+	case types.TInt32:
+		return types.NewValue(types.TInt32, int32(0)), nil
+	case types.TInt64:
+		return types.NewValue(types.TInt64, int64(0)), nil
+	case types.TUint8:
+		return types.NewValue(types.TUint8, uint8(0)), nil
+	case types.TUint16:
+		return types.NewValue(types.TUint16, uint16(0)), nil
+	case types.TUint32:
+		return types.NewValue(types.TUint32, uint32(0)), nil
+	case types.TUint64:
+		return types.NewValue(types.TUint64, uint64(0)), nil
+	case types.TFloat32:
+		return types.NewValue(types.TFloat32, float32(0)), nil
+	case types.TFloat64:
+		return types.NewValue(types.TFloat64, float64(0)), nil
+	case types.TNull:
+		return types.NewNull()
+	}
+	return types.Value{}, werr.Newf(werr.CodeSymbol,
+		"type %q not registered", typeName).WithPath(path)
+}
+
+func funcTypeName(rt reflect.Type) string {
+	params := make([]string, 0, rt.NumIn())
+	returns := make([]string, 0, rt.NumOut())
+	for i := 0; i < rt.NumIn(); i++ {
+		params = append(params, reflectTypeName(rt.In(i)))
+	}
+	for i := 0; i < rt.NumOut(); i++ {
+		returns = append(returns, reflectTypeName(rt.Out(i)))
+	}
+	return types.FuncType(params, returns)
+}
+
+func reflectTypeName(rt reflect.Type) string {
+	switch rt.Kind() {
+	case reflect.Int8:
+		return types.TInt8
+	case reflect.Int16:
+		return types.TInt16
+	case reflect.Int32:
+		return types.TInt32
+	case reflect.Int, reflect.Int64:
+		return types.TInt64
+	case reflect.Uint8:
+		return types.TUint8
+	case reflect.Uint16:
+		return types.TUint16
+	case reflect.Uint32:
+		return types.TUint32
+	case reflect.Uint64:
+		return types.TUint64
+	case reflect.Float32:
+		return types.TFloat32
+	case reflect.Float64:
+		return types.TFloat64
+	case reflect.Bool:
+		return types.TBoolean
+	case reflect.String:
+		return types.TString
+	}
+	if isReflectError(rt) {
+		return types.TError
+	}
+	return types.AutoHostTypeName(rt)
+}
+
+func isReflectError(rt reflect.Type) bool {
+	return rt.Implements(reflect.TypeOf((*error)(nil)).Elem())
+}
+
 // ---------- Built-in operators ----------
 
 type opHandler func(e *Executor, c *ast.Call) (types.Value, error)
@@ -255,38 +423,51 @@ var builtinOps map[string]opHandler
 
 func init() {
 	builtinOps = map[string]opHandler{
-		"+":          arithmeticOp("+"),
-		"-":          arithmeticOp("-"),
-		"*":          arithmeticOp("*"),
-		"/":          arithmeticOp("/"),
-		">":          compareOp(">"),
-		">=":         compareOp(">="),
-		"<":          compareOp("<"),
-		"<=":         compareOp("<="),
-		"==":         equalityOp(true),
-		"!=":         equalityOp(false),
-		"and":        logicalAnd,
-		"or":         logicalOr,
-		"!":          logicalNot,
-		"await":      awaitOp,
-		"contains":   stringBinOp("contains"),
-		"startsWith": stringBinOp("startsWith"),
-		"endsWith":   stringBinOp("endsWith"),
-		"arr.push":   arrayPush,
-		"arr.get":    arrayGet,
-		"arr.len":    arrayLen,
-		"m.get":      mapGet,
-		"m.set":      mapSet,
-		"m.del":      mapDel,
-		"m.has":      mapHas,
-		"m.len":      mapLen,
-		"m.keys":     mapKeys,
-		"m.values":   mapValues,
-		"ch.send":    chanSend,
-		"ch.recv":    chanRecv,
-		"ch.close":   chanClose,
-		"ch.len":     chanLen,
-		"ch.cap":     chanCap,
+		"+":              arithmeticOp("+"),
+		"-":              arithmeticOp("-"),
+		"*":              arithmeticOp("*"),
+		"/":              arithmeticOp("/"),
+		">":              compareOp(">"),
+		">=":             compareOp(">="),
+		"<":              compareOp("<"),
+		"<=":             compareOp("<="),
+		"==":             equalityOp(true),
+		"!=":             equalityOp(false),
+		"and":            logicalAnd,
+		"or":             logicalOr,
+		"!":              logicalNot,
+		"await":          awaitOp,
+		"contains":       stringBinOp("contains"),
+		"startsWith":     stringBinOp("startsWith"),
+		"endsWith":       stringBinOp("endsWith"),
+		"arr.push":       arrayPush,
+		"arr.get":        arrayGet,
+		"arr.set":        arraySet,
+		"arr.slice":      arraySlice,
+		"arr.len":        arrayLen,
+		"m.get":          mapGet,
+		"m.value":        mapValue,
+		"m.set":          mapSet,
+		"m.del":          mapDel,
+		"m.has":          mapHas,
+		"m.len":          mapLen,
+		"m.keys":         mapKeys,
+		"m.values":       mapValues,
+		"ch.send":        chanSend,
+		"ch.recv":        chanRecv,
+		"ch.close":       chanClose,
+		"ch.len":         chanLen,
+		"ch.cap":         chanCap,
+		"ptr.deref":      ptrDeref,
+		"ptr.new":        ptrNew,
+		"type.assert":    typeAssert,
+		"type.assert.ok": typeAssertOK,
+		"type.is":        typeIs,
+		"bit.not":        bitNot,
+		"copy":           copyBuiltin,
+		"complex":        complexBuiltin,
+		"real":           realBuiltin,
+		"imag":           imagBuiltin,
 	}
 }
 

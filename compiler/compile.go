@@ -158,8 +158,15 @@ func foldNode(n ast.Node) (ast.Node, error) {
 	switch x := n.(type) {
 	case nil:
 		return nil, nil
-	case *ast.Literal, *ast.Var, *ast.Pkg, *ast.Break, *ast.Continue:
+	case *ast.Literal, *ast.Var, *ast.Pkg, *ast.Symbol, *ast.Out, *ast.Zero, *ast.Break, *ast.Continue:
 		return n, nil
+	case *ast.MethodValue:
+		recv, err := foldNode(x.Receiver)
+		if err != nil {
+			return nil, err
+		}
+		x.Receiver = recv
+		return x, nil
 	case *ast.Return:
 		e, err := foldNode(x.Expr)
 		if err != nil {

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"reflect"
 	"strings"
 
 	"github.com/donutnomad/wlang/ast"
@@ -58,7 +59,7 @@ func (e *Executor) prepareFuncCall(x *ast.FuncCall) (preparedFuncCall, error) {
 	}
 	args := make([]types.Value, 0, len(x.Args))
 	for _, a := range x.Args {
-		v, err := e.Eval(a)
+		v, err := e.prepareCallArg(a)
 		if err != nil {
 			return preparedFuncCall{}, err
 		}
@@ -70,6 +71,9 @@ func (e *Executor) prepareFuncCall(x *ast.FuncCall) (preparedFuncCall, error) {
 func (e *Executor) invokePreparedFuncCall(call preparedFuncCall) (types.Value, error) {
 	cl, ok := call.fn.Go().(*Closure)
 	if !ok || !strings.HasPrefix(call.fn.TypeName(), "func<") {
+		if e.registry != nil && isGoFunctionValue(call.fn) {
+			return e.registry.CallValue(e.ctx, call.fn, call.args, call.path)
+		}
 		return types.Value{}, werr.Newf(werr.CodeType,
 			"call.fn must be function, got %s", call.fn.TypeName()).WithPath(call.path)
 	}
@@ -116,6 +120,15 @@ func (e *Executor) invokePreparedFuncCall(call preparedFuncCall) (types.Value, e
 		return e.checkFunctionReturn(cl, v, call.path)
 	}
 	return e.checkFunctionReturn(cl, v, call.path)
+}
+
+func isGoFunctionValue(v types.Value) bool {
+	g := v.Go()
+	if g == nil {
+		return false
+	}
+	rv := reflect.ValueOf(g)
+	return rv.IsValid() && rv.Kind() == reflect.Func
 }
 
 func (e *Executor) checkFunctionReturn(cl *Closure, v types.Value, path string) (types.Value, error) {

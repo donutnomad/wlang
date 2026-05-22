@@ -374,11 +374,11 @@ func Rule(xs []int64) {
 		{
 			name: "append item expression unsupported",
 			src: `package rules
-func Rule(xs []int64, x any) {
-	xs = append(xs, x.(int64))
+func Rule(xs []int64) {
+	xs = append(xs, make([]int64, 1)[0])
 }
 `,
-			want: "type assertions are not supported",
+			want: "make supports only channel types",
 		},
 	}
 	for _, tc := range cases {
@@ -419,12 +419,10 @@ func Rule() {
 func TestTranslateFileUnsupportedReportsDiagnostic(t *testing.T) {
 	src := []byte(`package rules
 
-func Rule(x any) string {
-	s, ok := x.(string)
-	if ok {
-		return s
-	}
-	return ""
+func Rule() int64 {
+	goto done
+done:
+	return 1
 }
 `)
 	_, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
@@ -438,8 +436,8 @@ func Rule(x any) string {
 	if diag.Line == 0 || diag.Column == 0 {
 		t.Fatalf("missing position in diagnostic: %+v", diag)
 	}
-	if !strings.Contains(diag.Node, "TypeAssertExpr") {
-		t.Fatalf("node = %q, want TypeAssertExpr", diag.Node)
+	if !strings.Contains(diag.Node, "BranchStmt") {
+		t.Fatalf("node = %q, want BranchStmt", diag.Node)
 	}
 }
 
@@ -510,7 +508,55 @@ func TestExampleOrderWorkflowTranslates(t *testing.T) {
 		`"arr.len"`,
 		`"fn"`,
 		`"call"`,
+		`"zero"`,
+		`"out"`,
+		`"symbol": "workflow.Reserve"`,
+		`"Get"`,
 		`"NewApplicationError"`,
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in:\n%s", needle, got)
+		}
+	}
+}
+
+func TestExampleFeatureShowcaseTranslates(t *testing.T) {
+	path := filepath.Join("examples", "feature_showcase.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "FeatureShowcase"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	pseudo, err := wflang.FormatPseudoCode(out)
+	if err != nil {
+		t.Fatalf("pseudo: %v", err)
+	}
+	got := string(pseudo)
+	for _, needle := range []string{
+		"if n > 0 {",
+		"let pair = struct examples.ShowcaseItem {",
+		"pair.Name = call symbol examples.Identity(pair.Name)",
+		"arr.set(scores, 0, n)",
+		"let val, ok = m.get(labels, \"primary\")",
+		"m.set(labels, \"copy\", val)",
+		"m.del(labels, \"primary\")",
+		"let part = arr.slice(scores, 0, 1)",
+		"let copied = copy(scores, keyed)",
+		"let s, typeOK = type.assert.ok(input, \"string\")",
+		"if type.is(input, \"string\") {",
+		"let x = type.assert(input, \"string\")",
+		"let p = ptr.new(\"int64\")",
+		"let deref = ptr.deref(value)",
+		"let mask = bit.not(val)",
+		"let z = complex(1, 2)",
+		"let realPart = real(z)",
+		"let imagPart = imag(z)",
+		"routine {",
+		"let msg = \"ready\"",
+		"select {",
 	} {
 		if !strings.Contains(got, needle) {
 			t.Fatalf("missing %q in:\n%s", needle, got)

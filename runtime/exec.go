@@ -23,6 +23,11 @@ const RoutineHandleType = "routineHandle"
 type HostRegistry interface {
 	Invoke(ctx context.Context, op string, recv types.Value,
 		args []types.Value, path string) (types.Value, error)
+	CallValue(ctx context.Context, fn types.Value, args []types.Value,
+		path string) (types.Value, error)
+	BindMethodValue(ctx context.Context, recv types.Value, name, path string) (types.Value, error)
+	ResolveSymbol(name, path string) (types.Value, error)
+	ZeroValue(typeName, path string) (types.Value, error)
 	// StructType returns the reflect.Type for a registered struct type used by
 	// struct-literal evaluation (LANGUAGE.md §3.9). Implementations that do not
 	// expose struct types may always return false.
@@ -810,6 +815,8 @@ func containsReturn(n ast.Node) bool {
 		return containsReturn(x.Buffer)
 	case *ast.Var:
 		return containsReturn(x.Default)
+	case *ast.MethodValue:
+		return containsReturn(x.Receiver)
 	case *ast.Routine:
 		// Routine.Body is a child-routine boundary: a `return` there resolves
 		// the routine handle, it does not end the enclosing program. Only the

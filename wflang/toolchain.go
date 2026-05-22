@@ -88,6 +88,18 @@ func dumpNode(n ast.Node) (any, error) {
 		return map[string]any{"var": map[string]any{"name": x.Name, "default": dv}}, nil
 	case *ast.Pkg:
 		return map[string]any{"pkg": x.Name}, nil
+	case *ast.Symbol:
+		return map[string]any{"symbol": x.Name}, nil
+	case *ast.MethodValue:
+		recv, err := dumpNode(x.Receiver)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"method": []any{recv, x.Name}}, nil
+	case *ast.Out:
+		return map[string]any{"out": x.Name}, nil
+	case *ast.Zero:
+		return map[string]any{"zero": x.TypeName}, nil
 	case *ast.Array:
 		items := make([]any, 0, len(x.Items))
 		for _, e := range x.Items {
@@ -310,6 +322,8 @@ func walkPath(n ast.Node, target string) (ast.Node, bool) {
 		if x.Default != nil {
 			return walkPath(x.Default, target)
 		}
+	case *ast.MethodValue:
+		return walkPath(x.Receiver, target)
 	case *ast.Array:
 		for _, it := range x.Items {
 			if r, ok := walkPath(it, target); ok {
@@ -351,6 +365,14 @@ func walkPath(n ast.Node, target string) (ast.Node, bool) {
 			}
 		}
 	case *ast.Let:
+		if len(x.Bindings) > 0 {
+			for _, b := range x.Bindings {
+				if r, ok := walkPath(b.Expr, target); ok {
+					return r, true
+				}
+			}
+			return nil, false
+		}
 		return walkPath(x.Expr, target)
 	case *ast.Set:
 		return walkPath(x.Expr, target)
@@ -427,6 +449,8 @@ func (p *Program) Explain() ExplainReport {
 			vars[x.Name] = true
 		case *ast.Pkg:
 			pkgs[x.Name] = true
+		case *ast.Symbol:
+			ops[x.Name] = true
 		case *ast.Call:
 			ops[x.Op] = true
 			if reg != nil && len(x.Args) > 0 {
@@ -457,6 +481,8 @@ func walkChildren(n ast.Node, fn func(ast.Node)) {
 		if x.Default != nil {
 			fn(x.Default)
 		}
+	case *ast.MethodValue:
+		fn(x.Receiver)
 	case *ast.Array:
 		for _, it := range x.Items {
 			fn(it)
@@ -482,7 +508,13 @@ func walkChildren(n ast.Node, fn func(ast.Node)) {
 			fn(a)
 		}
 	case *ast.Let:
-		fn(x.Expr)
+		if len(x.Bindings) > 0 {
+			for _, b := range x.Bindings {
+				fn(b.Expr)
+			}
+		} else {
+			fn(x.Expr)
+		}
 	case *ast.Set:
 		fn(x.Expr)
 	case *ast.Return:
@@ -650,6 +682,7 @@ type SchemaIssue struct {
 // apply. Used by both ValidateSchema and Format.
 var reservedOperators = map[string]bool{
 	"literal": true, "array": true, "var": true, "pkg": true,
+	"symbol": true, "method": true, "out": true, "zero": true,
 	"if": true, "let": true, "set": true, "return": true,
 	"routine": true, "await": true, "panic": true, "expr": true,
 	"foreach": true, "fori": true, "break": true, "continue": true,
@@ -757,7 +790,7 @@ func walkSchema(path string, v any, issues *[]SchemaIssue, inStmt bool) {
 func isCompositeBody(op string) bool {
 	switch op {
 	case "let", "set", "foreach", "fori", "if", "array", "routine", "await",
-		"defer", "map", "struct", "chan", "select":
+		"defer", "map", "struct", "chan", "select", "method":
 		return true
 	}
 	return false
@@ -1193,6 +1226,32 @@ func (t *tracingRegistry) Invoke(ctx context.Context, op string, recv types.Valu
 	}
 	t.events = append(t.events, ev)
 	return v, err
+}
+
+func (t *tracingRegistry) CallValue(ctx context.Context, fn types.Value,
+	args []types.Value, path string) (types.Value, error) {
+	ev := TraceEvent{Path: path, Op: "call"}
+	v, err := t.inner.CallValue(ctx, fn, args, path)
+	if err != nil {
+		ev.Error = err.Error()
+	} else {
+		ev.Type = v.TypeName()
+		ev.Result = v.Go()
+	}
+	t.events = append(t.events, ev)
+	return v, err
+}
+
+func (t *tracingRegistry) BindMethodValue(ctx context.Context, recv types.Value, name, path string) (types.Value, error) {
+	return t.inner.BindMethodValue(ctx, recv, name, path)
+}
+
+func (t *tracingRegistry) ResolveSymbol(name, path string) (types.Value, error) {
+	return t.inner.ResolveSymbol(name, path)
+}
+
+func (t *tracingRegistry) ZeroValue(typeName, path string) (types.Value, error) {
+	return t.inner.ZeroValue(typeName, path)
 }
 
 // StructType forwards to the wrapped registry so struct-literal evaluation

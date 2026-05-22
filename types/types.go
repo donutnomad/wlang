@@ -30,6 +30,7 @@ const (
 	TBigInt     = "bigInt"
 	TBigDecimal = "bigDecimal"
 	TAny        = "any"
+	TOut        = "__out__"
 )
 
 // Value is the runtime wrapper for every language value.
@@ -37,6 +38,16 @@ const (
 type Value struct {
 	typ string
 	val any
+}
+
+// OutArg is the runtime carrier for {"out":"name"} call arguments. The
+// registry prepares the actual Go pointer from Current, then calls Commit with
+// the updated value after the host function returns.
+type OutArg struct {
+	Name     string
+	TypeName string
+	Current  Value
+	Commit   func(Value) error
 }
 
 // TypeName returns the language type name.

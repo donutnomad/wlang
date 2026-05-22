@@ -260,6 +260,14 @@ func (f *pseudoFormatter) expr(n ast.Node) string {
 		return x.Name
 	case *ast.Pkg:
 		return x.Name
+	case *ast.Symbol:
+		return "symbol " + x.Name
+	case *ast.MethodValue:
+		return f.expr(x.Receiver) + "." + x.Name
+	case *ast.Out:
+		return "&" + x.Name
+	case *ast.Zero:
+		return "zero " + x.TypeName
 	case *ast.Call:
 		return f.callExpr(x)
 	case *ast.Array:
@@ -337,18 +345,30 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 	if isPrefixOp(c.Op) && len(c.Args) == 1 {
 		return c.Op + f.expr(c.Args[0])
 	}
-	if (c.Op == "await" || strings.HasPrefix(c.Op, "m.") || strings.HasPrefix(c.Op, "ch.") || strings.HasPrefix(c.Op, "arr.")) && len(c.Args) > 0 {
+	if isBuiltinCallOp(c.Op) && len(c.Args) > 0 {
 		return c.Op + "(" + f.exprList(c.Args) + ")"
 	}
 	if len(c.Args) > 0 {
 		if pkg, ok := c.Args[0].(*ast.Pkg); ok {
 			return pkg.Name + "." + c.Op + "(" + f.exprList(c.Args[1:]) + ")"
 		}
-		if recv, ok := c.Args[0].(*ast.Var); ok {
-			return recv.Name + "." + c.Op + "(" + f.exprList(c.Args[1:]) + ")"
-		}
+		return f.expr(c.Args[0]) + "." + c.Op + "(" + f.exprList(c.Args[1:]) + ")"
 	}
 	return c.Op + "(" + f.exprList(c.Args) + ")"
+}
+
+func isBuiltinCallOp(op string) bool {
+	return op == "await" ||
+		op == "copy" ||
+		op == "complex" ||
+		op == "real" ||
+		op == "imag" ||
+		strings.HasPrefix(op, "m.") ||
+		strings.HasPrefix(op, "ch.") ||
+		strings.HasPrefix(op, "arr.") ||
+		strings.HasPrefix(op, "ptr.") ||
+		strings.HasPrefix(op, "type.") ||
+		strings.HasPrefix(op, "bit.")
 }
 
 func (f *pseudoFormatter) exprList(nodes []ast.Node) string {

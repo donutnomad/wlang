@@ -192,6 +192,9 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 - 包调用，例如 `demo.Score(user, total)`
 - 当前包调用，例如 `BuildFailureReason(step, err)`
 - 接收者调用，例如 `svc.Run(input)`
+- 静态函数符号作为值，例如 `activities.Reserve`
+- receiver 方法值，例如 `worker.Compensate`
+- 输出参数 `&reserve`
 - 函数字面量作为值
 - 函数值调用，例如 `compensations[i](ctx, reason)`
 - 索引表达式 `xs[i]`
@@ -220,6 +223,65 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 
 ```json
 {"Run":[{"var":"svc"},{"var":"x"}]}
+```
+
+静态 Go 函数作为值会生成 `symbol`。导入包函数值 `activities.Reserve` 会生成：
+
+```json
+{"symbol":"activities.Reserve"}
+```
+
+当前包顶层函数值 `Helper` 会生成：
+
+```json
+{"symbol":"rules.Helper"}
+```
+
+局部函数变量保持 `var`。当局部变量遮蔽同名顶层函数时，`Helper(input)` 会生成动态函数值调用：
+
+```json
+{"call":{"fn":{"var":"Helper"},"args":[{"var":"input"}]}}
+```
+
+receiver 方法值会生成 `method`：
+
+```go
+method := worker.Compensate
+```
+
+```json
+{"method":[{"var":"worker"},"Compensate"]}
+```
+
+链式调用按通用 receiver call 嵌套表达：
+
+```go
+workflow.ExecuteActivity(ctx, activities.Reserve, id).Get(ctx, &reserve)
+```
+
+```json
+{
+  "Get": [
+    {
+      "ExecuteActivity": [
+        { "pkg": "workflow" },
+        { "var": "ctx" },
+        { "symbol": "activities.Reserve" },
+        { "var": "id" }
+      ]
+    },
+    { "var": "ctx" },
+    { "out": "reserve" }
+  ]
+}
+```
+
+`&ident` 会生成 `out`。`&selector`、`&index` 和其它复杂取址表达式会返回稳定诊断，迁移时先把值放入局部变量。
+
+`var x NamedType` 会生成 typed zero：
+
+```json
+{"let":{"x":{"zero":"rules.NamedType"}}}
 ```
 
 使用 `TranslateFilePath` 时，选择器归属由 `go/types` 数据和已解析的导入包名共同决定。它可以处理项目内导入、`go.work` 模块、遮蔽导入别名的局部变量，以及声明包名与路径末段不同的导入。当类型检查无法解析依赖时，翻译器会回退到上面的语法级别别名规则。
@@ -257,11 +319,10 @@ compErr := compensations[i](ctx, reason)
 v1 当前范围外：
 
 - 嵌套函数声明
-- 接口分派、类型断言和类型 switch
-- 反射、`unsafe` 和 cgo
-- 泛型专属结构
-- 指针取址、指针解引用和复杂别名写入
-- map/slice 索引赋值
+- 接口分派的静态建模
+- cgo
+- 泛型类型声明和泛型方法声明
+- `&index`、复杂取址和复杂别名写入
 - `switch` fallthrough 和带标签控制流
 - `goto`
 - `recover`

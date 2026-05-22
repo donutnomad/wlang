@@ -197,6 +197,10 @@ func (t *typeChecker) walk(n ast.Node) error {
 			}
 		}
 		return nil
+	case *ast.MethodValue:
+		return t.walk(x.Receiver)
+	case *ast.Symbol, *ast.Out, *ast.Zero:
+		return nil
 	case *ast.Call:
 		return t.walkCall(x)
 	}

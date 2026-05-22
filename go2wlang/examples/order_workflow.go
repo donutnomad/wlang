@@ -36,7 +36,7 @@ type Runner interface {
 func OrderWorkflow(ctx workflow.Context, runner Runner, input OrderInput) (err error) {
 	var compensations []func(workflow.Context, FailureReason) error
 	failedStep := ""
-	reserve := ReserveResult{ID: ""}
+	var reserve ReserveResult
 
 	defer func() {
 		if err == nil {
@@ -58,7 +58,10 @@ func OrderWorkflow(ctx workflow.Context, runner Runner, input OrderInput) (err e
 	}()
 
 	failedStep = "step1_reserve"
-	reserve = workflow.Reserve(ctx, input.OrderID)
+	err = workflow.ExecuteActivity(ctx, workflow.Reserve, input.OrderID).Get(ctx, &reserve)
+	if err != nil {
+		return err
+	}
 	compensations = append(compensations, func(ctx workflow.Context, reason FailureReason) error {
 		return workflow.MarkReserveFailed(ctx, MarkFailedInput{
 			OrderID:    input.OrderID,

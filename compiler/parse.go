@@ -36,6 +36,10 @@ var builtinKeywords = map[string]bool{
 	"literal":  true,
 	"var":      true,
 	"pkg":      true,
+	"symbol":   true,
+	"method":   true,
+	"out":      true,
+	"zero":     true,
 	"if":       true,
 	"let":      true,
 	"set":      true,
@@ -194,6 +198,14 @@ func parseNodeWithKey(key string, body any, path string) (ast.Node, error) {
 		return parseVar(body, nodePath)
 	case "pkg":
 		return parsePkg(body, nodePath)
+	case "symbol":
+		return parseSymbol(body, nodePath)
+	case "method":
+		return parseMethodValue(body, nodePath)
+	case "out":
+		return parseOut(body, nodePath)
+	case "zero":
+		return parseZero(body, nodePath)
 	case "if":
 		return parseIf(body, nodePath)
 	case "let":
@@ -398,6 +410,51 @@ func parsePkg(body any, path string) (ast.Node, error) {
 			"pkg body must be string").WithPath(path)
 	}
 	return &ast.Pkg{Base: ast.Base{P: path}, Name: s}, nil
+}
+
+func parseSymbol(body any, path string) (ast.Node, error) {
+	s, ok := body.(string)
+	if !ok || s == "" {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"symbol body must be a non-empty string").WithPath(path)
+	}
+	return &ast.Symbol{Base: ast.Base{P: path}, Name: s}, nil
+}
+
+func parseMethodValue(body any, path string) (ast.Node, error) {
+	arr, ok := body.([]any)
+	if !ok || len(arr) != 2 {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"method body must be [receiverExpr, methodName]").WithPath(path)
+	}
+	recv, err := parseExpr(arr[0], path+"/0")
+	if err != nil {
+		return nil, err
+	}
+	name, ok := arr[1].(string)
+	if !ok || name == "" {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"method name must be a non-empty string").WithPath(path + "/1")
+	}
+	return &ast.MethodValue{Base: ast.Base{P: path}, Receiver: recv, Name: name}, nil
+}
+
+func parseOut(body any, path string) (ast.Node, error) {
+	s, ok := body.(string)
+	if !ok || s == "" {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"out body must be a non-empty variable name").WithPath(path)
+	}
+	return &ast.Out{Base: ast.Base{P: path}, Name: s}, nil
+}
+
+func parseZero(body any, path string) (ast.Node, error) {
+	s, ok := body.(string)
+	if !ok || s == "" {
+		return nil, werr.Newf(werr.CodeASTShape,
+			"zero body must be a non-empty type name").WithPath(path)
+	}
+	return &ast.Zero{Base: ast.Base{P: path}, TypeName: s}, nil
 }
 
 func parseIf(body any, path string) (ast.Node, error) {

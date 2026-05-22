@@ -112,3 +112,30 @@ func TestFormatPseudoCode_FullFeatureDemoLandmarks(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatPseudoCode_ReceiverCallChainUsesDotSyntax(t *testing.T) {
+	src := []byte(`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"set":{"err":{"Get":[
+	      {"ExecuteActivity":[
+	        {"pkg":"workflow"},
+	        {"var":"ctx"},
+	        {"symbol":"workflow.Reserve"},
+	        {"var":"input.OrderID"}
+	      ]},
+	      {"var":"ctx"},
+	      {"out":"reserve"}
+	    ]}}}
+	  ]
+	}`)
+	out, err := wflang.FormatPseudoCode(src)
+	if err != nil {
+		t.Fatalf("format pseudo: %v", err)
+	}
+	got := string(out)
+	want := "err = workflow.ExecuteActivity(ctx, symbol workflow.Reserve, input.OrderID).Get(ctx, &reserve)"
+	if got != want {
+		t.Fatalf("pseudo code mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}

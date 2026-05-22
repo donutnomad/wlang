@@ -68,6 +68,9 @@
 - `if cond { ... }`
 - `if cond { ... } else { ... }`
 - `if cond { ... } else if cond { ... }`
+- `if init; cond { ... }`
+- 表达式 `switch` 和条件 `switch`
+- 类型 switch，生成 `type.is` / `type.assert`
 - 计数循环：`for i := from; i < to; i++ { ... }`
 - 带步长的计数循环：`for i := from; i < to; i += step { ... }`
 - 反向计数循环：`for i := len(xs)-1; i >= 0; i-- { ... }`
@@ -75,24 +78,22 @@
 - range 循环：`for _, item := range xs { ... }`
 - `break`
 - `continue`
+- 标签语句透传其内部语句
+- 带标签的 `break`
+- 带标签的 `continue`
 - `panic(expr)`
 - `defer pkg.Call(args...)`
 - `defer receiver.Call(args...)`
 - `defer func(){ ... }()`
 - `go pkg.Call(args...)`
 - `go func(){ ... }()`
+- `go func(arg T){ ... }(value)`
 - channel 发送语句：`ch <- value`
 - 包含发送、接收和 default case 的 `select`。
 
 当前范围外：
 
-- `if init; cond { ... }`
-- `switch`
-- 类型 switch
 - `goto`
-- 标签
-- 带标签的 `break`
-- 带标签的 `continue`
 - 循环 post 子句外的独立 `i++` 或 `i--`。
 - 省略 init、condition 和 post 的 `for`。
 - 含多个 init 或 post 语句的 `for`。
@@ -114,27 +115,35 @@
 - 布尔字面量
 - `nil`
 - 一元 `!`
+- 一元 `-`、`+`、`^`
+- 指针解引用 `*ptr`
 - 二元 `+`、`-`、`*`、`/`
 - 比较运算 `>`、`>=`、`<`、`<=`、`==`、`!=`
 - 布尔运算 `&&`、`||`
 - 括号表达式
 - 接收表达式：`<-ch`
-- 索引表达式：`xs[i]` 生成 `arr.get(xs, i)`。
+- slice/array 索引表达式：`xs[i]` 生成 `arr.get(xs, i)`。
+- map 单值索引表达式：`m[k]` 生成 `m.value(m, k)`。
+- map 双值索引表达式：`v, ok := m[k]` 生成 `m.get(m, k)`。
+- 切片表达式：`xs[a:b]` 生成 `arr.slice(xs, a, b)`。
+- 取址输出参数：`&ident` 生成 `out`。
+- 取址输出参数：`&selector` 生成带路径的 `out`。
+- 类型断言：`x.(T)` 生成 `type.assert`。
+- 双值类型断言：`v, ok := x.(T)` 生成 `type.assert.ok`。
+- 泛型函数实例化调用会去掉类型实参并翻译普通调用。
+- `reflect` 和 `unsafe` 包选择器调用按普通包函数调用翻译。
+- 导入包函数值：`pkg.Func` 生成 `symbol`。
+- 当前包顶层函数值：`Helper` 生成 `symbol`。
+- receiver 方法值：`receiver.Method` 生成 `method`。
 - 函数字面量作为值。
 - 函数变量调用：`fn(args...)`。
 - 函数风格的 `int64(expr)` 转换。
 
 当前范围外：
 
-- 一元 `-`、`+`、`^`、`&`、`*`
-- 指针解引用
-- 指针取址
-- map 索引表达式：`m[k]`
-- 切片表达式：`xs[a:b]`
-- 类型断言
-- 方法值。
-- 泛型专属表达式。
-- 反射和 `unsafe`。
+- `&index` 和复杂取址表达式。
+- 泛型类型声明和泛型方法声明。
+- 反射结果的静态类型建模。
 
 ## 调用
 
@@ -144,6 +153,8 @@
 - 接收者方法调用：`svc.Run(input)`
 - 当前包函数调用：`BuildFailureReason(step, err)`
 - 函数值调用：`compensations[i](ctx, reason)`
+- 静态函数符号动态调用：`Helper(x)` 在类型信息可用时生成 `call` + `symbol`。
+- 链式 receiver 调用：`future.Get(ctx, &out)` 生成嵌套 receiver call。
 - 作为表达式使用的调用。
 - 作为语句使用的调用。
 - `defer` 使用的调用。
@@ -159,27 +170,31 @@
 - `int64(v)`
 - `len(xs)` 生成 `arr.len(xs)`
 - `append(xs, v)` 在 `xs = append(xs, v)` 中生成 `arr.push(xs, v)`
+- `delete(m, k)` 生成 `m.del(m, k)`
+- `cap(ch)` 生成 `ch.cap(ch)`，`cap(xs)` 生成 `arr.len(xs)`
+- `new(T)` 生成 `ptr.new("T")`
+- `copy(dst, src)` 生成 `copy(dst, src)`
+- `complex`、`real`、`imag` 生成同名内建调用
 
 当前范围外：
 
 - 可变参数展开：`fn(xs...)`。
-- `copy`、`delete`、`cap`、`new`、`complex`、`real`、`imag` 等内建函数。
 
 ## 复合字面量
 
 已支持：
 
 - 省略键的数组和切片字面量：`[]int64{1, 2}`。
+- 带键数组元素：`[]int64{2: 99}`。
 - 含键值元素的 map 字面量：`map[string]int64{"a": 1}`。
 - 包限定结构体字面量：`api.Args{Name: "aaa"}`。
 - 当前包结构体字面量：`Args{Name: "aaa"}`。
+- 无键结构体字面量：`Args{"aaa"}`，字段名来自 Go 类型信息。
 - 当前包结构体字面量作为调用参数：`a.Book(ctx, Args{Name: "aaa"})`。
 - 使用 `Options.LocalPackageName` 控制当前包结构体字面量的生成类型前缀。
 
 当前范围外：
 
-- 无键结构体字面量：`api.Args{"aaa"}`。
-- 带键数组元素：`[]int64{2: 99}`。
 - 复合字面量内部嵌套当前范围外的表达式。
 
 ## Channel 和并发
@@ -193,6 +208,7 @@
 - `close(ch)`
 - `go pkg.Call(args...)`
 - `go func(){ ... }()`
+- `go func(arg T){...}(value)`
 - `select` 接收 case。
 - `select` 发送 case。
 - `select` default case。
@@ -200,7 +216,6 @@
 当前范围外：
 
 - 翻译输出中的定向 channel 类型区分。
-- `go func(arg T){...}(value)`。
 - select case 中的复杂接收目标。
 
 ## 输出形状
