@@ -1989,6 +1989,13 @@ func typeName(e ast.Expr) string {
 			return ""
 		}
 		return "array<" + elem + ">"
+	case *ast.MapType:
+		key := typeName(x.Key)
+		val := typeName(x.Value)
+		if key == "" || val == "" {
+			return ""
+		}
+		return "map<" + key + "," + val + ">"
 	case *ast.StarExpr:
 		elem := typeName(x.X)
 		if elem == "" {
@@ -2023,6 +2030,13 @@ func (t *translator) typeName(e ast.Expr) string {
 			return ""
 		}
 		return "array<" + elem + ">"
+	case *ast.MapType:
+		key := t.typeName(x.Key)
+		val := t.typeName(x.Value)
+		if key == "" || val == "" {
+			return ""
+		}
+		return "map<" + key + "," + val + ">"
 	case *ast.StarExpr:
 		elem := t.typeName(x.X)
 		if elem == "" {

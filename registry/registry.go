@@ -324,6 +324,23 @@ func (r *Registry) ZeroValue(typeName, path string) (types.Value, error) {
 	if strings.HasPrefix(typeName, "array<") && strings.HasSuffix(typeName, ">") {
 		return types.NewArray(typeName[6:len(typeName)-1], nil)
 	}
+	if k, v, ok := splitMapTypeName(typeName); ok {
+		kt, err := primitiveReflectType(k)
+		if err != nil {
+			return types.Value{}, werr.Newf(werr.CodeType,
+				"%s: bad key type: %v", typeName, err).WithPath(path)
+		}
+		vt, err := primitiveReflectType(v)
+		if err != nil {
+			return types.Value{}, werr.Newf(werr.CodeType,
+				"%s: bad value type: %v", typeName, err).WithPath(path)
+		}
+		if !validMapKeyReflectType(kt) {
+			return types.Value{}, werr.Newf(werr.CodeType,
+				"%s: key type %s is not comparable", typeName, k).WithPath(path)
+		}
+		return types.NewValue(typeName, reflect.Zero(reflect.MapOf(kt, vt)).Interface()), nil
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	bt, ok := r.types[typeName]
@@ -332,6 +349,56 @@ func (r *Registry) ZeroValue(typeName, path string) (types.Value, error) {
 			"type %q not registered", typeName).WithPath(path)
 	}
 	return types.NewValue(typeName, reflect.Zero(bt.rt).Interface()), nil
+}
+
+func splitMapTypeName(typeName string) (string, string, bool) {
+	const prefix = "map<"
+	if len(typeName) < len(prefix)+3 || !strings.HasPrefix(typeName, prefix) || !strings.HasSuffix(typeName, ">") {
+		return "", "", false
+	}
+	body := typeName[len(prefix) : len(typeName)-1]
+	parts := strings.SplitN(body, ",", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func primitiveReflectType(typeName string) (reflect.Type, error) {
+	switch typeName {
+	case types.TString:
+		return reflect.TypeOf(""), nil
+	case types.TBoolean:
+		return reflect.TypeOf(false), nil
+	case types.TInt8:
+		return reflect.TypeOf(int8(0)), nil
+	case types.TInt16:
+		return reflect.TypeOf(int16(0)), nil
+	case types.TInt32:
+		return reflect.TypeOf(int32(0)), nil
+	case types.TInt64:
+		return reflect.TypeOf(int64(0)), nil
+	case types.TUint8:
+		return reflect.TypeOf(uint8(0)), nil
+	case types.TUint16:
+		return reflect.TypeOf(uint16(0)), nil
+	case types.TUint32:
+		return reflect.TypeOf(uint32(0)), nil
+	case types.TUint64:
+		return reflect.TypeOf(uint64(0)), nil
+	case types.TFloat32:
+		return reflect.TypeOf(float32(0)), nil
+	case types.TFloat64:
+		return reflect.TypeOf(float64(0)), nil
+	case types.TAny, "":
+		var anyT any
+		return reflect.TypeOf(&anyT).Elem(), nil
+	}
+	return nil, werr.Newf(werr.CodeType, "unsupported type %q", typeName)
+}
+
+func validMapKeyReflectType(rt reflect.Type) bool {
+	return rt != nil && rt.Comparable()
 }
 
 // CallValue invokes a Go function carrier through the same reflection path as

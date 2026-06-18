@@ -206,3 +206,34 @@ func TestFormatPseudoCode_MapBuiltinSugar(t *testing.T) {
 		t.Fatalf("pseudo code mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
 	}
 }
+
+func TestFormatPseudoCode_MapValueInsideMapEntryIsStatic(t *testing.T) {
+	src := []byte(`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"let":{"signIn":{"map":{
+	      "type":["string","any"],
+	      "entries":[[
+	        {"literal":{"type":"string","value":"reservation_id"}},
+	        {"map.value":[
+	          {"var":"reserve"},
+	          {"literal":{"type":"string","value":"reservation_id"}}
+	        ]}
+	      ]]
+	    }}}}
+	  ]
+	}`)
+	out, err := wflang.FormatPseudoCode(src)
+	if err != nil {
+		t.Fatalf("format pseudo: %v", err)
+	}
+	got := string(out)
+	want := strings.Join([]string{
+		"let signIn = map<string,any> {",
+		"  \"reservation_id\": reserve[\"reservation_id\"]",
+		"}",
+	}, "\n")
+	if got != want {
+		t.Fatalf("pseudo code mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}

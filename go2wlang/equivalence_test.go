@@ -2,6 +2,7 @@ package go2wlang_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -72,6 +73,27 @@ func (b *eqBooker) Book(args eqBookArgs) eqBookResult {
 	b.booked = append(b.booked, args)
 	return eqBookResult{Name: args.Name, Message: "risk"}
 }
+
+type eqMapFuture struct {
+	value map[string]any
+}
+
+type eqMapContext struct{}
+
+func (f eqMapFuture) Get(ctx eqMapContext, out any) error {
+	target, ok := out.(*map[string]any)
+	if !ok {
+		return errors.New("bad out target")
+	}
+	*target = f.value
+	return nil
+}
+
+func eqExecuteMapActivity(ctx eqMapContext, activity any, input map[string]any) eqMapFuture {
+	return eqMapFuture{value: map[string]any{"reservation_id": "res-" + input["order_id"].(string)}}
+}
+
+func eqReserveActivity() {}
 
 func eqPrepareName(user eqUser) string {
 	return user.Name + "-prepared"
@@ -579,6 +601,65 @@ func OrderWorkflow(ctx workflow.Context, runner *eqWorkflowRunner, input eqOrder
 				t.Fatalf("side effects mismatch\nwant: %#v\ngot:  %#v", goLog, runtimeLog)
 			}
 		})
+	}
+}
+
+func TestTranslatedMapOutGetSupportsSubsequentMapValue(t *testing.T) {
+	src := []byte(`package orders
+
+import (
+	activities "example.com/activities"
+	workflow "example.com/workflow"
+)
+
+type Context struct{}
+
+func OrderWorkflow(ctx Context, input map[string]any) any {
+	reserveIn := map[string]any{"order_id": input["order_id"]}
+	var reserve map[string]any
+	err := workflow.ExecuteActivity(ctx, activities.Reserve, reserveIn).Get(ctx, &reserve)
+	if err != nil {
+		return err
+	}
+	signIn := map[string]any{"reservation_id": reserve["reservation_id"]}
+	return signIn["reservation_id"]
+}
+`)
+	jsonProgram, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "OrderWorkflow"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	reg := wflang.DefaultRegistry()
+	if err := reg.BindGoPackage("workflow", registry.PackageSpec{
+		Functions: []registry.FuncSpec{
+			{GoName: "ExecuteActivity", Impl: eqExecuteMapActivity},
+		},
+	}); err != nil {
+		t.Fatalf("BindGoPackage workflow: %v", err)
+	}
+	if err := reg.BindSymbol("activities.Reserve", eqReserveActivity); err != nil {
+		t.Fatalf("BindSymbol activities.Reserve: %v", err)
+	}
+	if err := reg.AutoBindType(eqMapFuture{}); err != nil {
+		t.Fatalf("AutoBindType future: %v", err)
+	}
+
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
+	prog, err := eng.CompileJSON(jsonProgram)
+	if err != nil {
+		t.Fatalf("CompileJSON: %v\n%s", err, jsonProgram)
+	}
+	got, err := prog.Run(context.Background(), wflang.RunOptions{
+		Vars: map[string]any{
+			"ctx":   eqMapContext{},
+			"input": map[string]any{"order_id": "A100"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run generated JSON: %v\n%s", err, jsonProgram)
+	}
+	if got.Go() != "res-A100" {
+		t.Fatalf("want res-A100, got %s=%v", got.TypeName(), got.Go())
 	}
 }
 

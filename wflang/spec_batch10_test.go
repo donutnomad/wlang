@@ -3,6 +3,7 @@ package wflang_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/donutnomad/wlang/wflang"
@@ -78,6 +79,35 @@ func TestTC090_AnyFallback(t *testing.T) {
 	}
 	if unwrap1(t, v).(string) != "ok" {
 		t.Fatalf("want ok, got %v", v.Go())
+	}
+}
+
+func TestRunOptionsMapStringAnyHasWlangMapType(t *testing.T) {
+	src := []byte(`[{"return":{"map.value":[
+		{"var":"input"},
+		{"literal":{"type":"string","value":"order_id"}}
+	]}}]`)
+	v, err := runSrc(t, src, map[string]any{
+		"input": map[string]any{"order_id": "A100"},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if v.TypeName() != "any" || v.Go() != "A100" {
+		t.Fatalf("want any=A100, got %s=%v", v.TypeName(), v.Go())
+	}
+}
+
+func TestRunOptionsMapIntKeysKeepHostType(t *testing.T) {
+	src := []byte(`[{"return":{"map.keys":[{"var":"input"}]}}]`)
+	_, err := runSrc(t, src, map[string]any{
+		"input": map[int]string{1: "A100"},
+	})
+	if err == nil {
+		t.Fatalf("map[int]string should stay a host map outside map<K,V> builtins")
+	}
+	if !strings.Contains(err.Error(), "[E_TYPE]") {
+		t.Fatalf("want E_TYPE, got %v", err)
 	}
 }
 

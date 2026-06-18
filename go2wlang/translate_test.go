@@ -1,6 +1,7 @@
 package go2wlang_test
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -298,6 +299,70 @@ func Rule(labels map[string]int64) int64 {
 		if strings.Contains(got, legacy) {
 			t.Fatalf("found legacy %q in:\n%s", legacy, got)
 		}
+	}
+}
+
+func TestTranslateFileFormatsMapValueInsideMapLiteral(t *testing.T) {
+	src := []byte(`package rules
+
+import "example.com/workflow"
+import "example.com/activities"
+
+func OrderWorkflow(ctx workflow.Context, input map[string]any) error {
+	reserveIn := map[string]any{"order_id": input["order_id"]}
+	var reserve map[string]any
+	err := workflow.ExecuteActivity(ctx, activities.Reserve, reserveIn).Get(ctx, &reserve)
+	if err != nil {
+		return err
+	}
+	signIn := map[string]any{"reservation_id": reserve["reservation_id"]}
+	_ = signIn
+	return nil
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "OrderWorkflow"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	pseudo, err := wflang.FormatPseudoCode(out)
+	if err != nil {
+		t.Fatalf("pseudo: %v\n%s", err, out)
+	}
+	got := string(pseudo)
+	if !strings.Contains(got, `let signIn = map<string,any> {`) ||
+		!strings.Contains(got, `"reservation_id": reserve["reservation_id"]`) {
+		t.Fatalf("missing formatted signIn map value in:\n%s", got)
+	}
+}
+
+func TestTranslateFileVarMapAnyUsesTypedZero(t *testing.T) {
+	src := []byte(`package rules
+
+func Rule() map[string]any {
+	var reserve map[string]any
+	return reserve
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	var tree struct {
+		Program []map[string]any `json:"program"`
+	}
+	if err := json.Unmarshal(out, &tree); err != nil {
+		t.Fatalf("generated JSON should decode: %v\n%s", err, out)
+	}
+	letBody, ok := tree.Program[0]["let"].(map[string]any)
+	if !ok {
+		t.Fatalf("first statement should be let:\n%s", out)
+	}
+	reserve, ok := letBody["reserve"].(map[string]any)
+	if !ok {
+		t.Fatalf("reserve binding should be object:\n%s", out)
+	}
+	if got, _ := reserve["zero"].(string); got != "map<string,any>" {
+		t.Fatalf("reserve zero = %q, want map<string,any>\n%s", got, out)
 	}
 }
 

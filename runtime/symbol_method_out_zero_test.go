@@ -78,6 +78,34 @@ func TestSymbolFunctionCallWritesOutToTypedZero(t *testing.T) {
 	}
 }
 
+func TestSymbolFunctionCallWritesOutToMapZero(t *testing.T) {
+	reg := registry.New()
+	if err := reg.BindSymbol("orders.FillReserveMap", func(out *map[string]any) error {
+		*out = map[string]any{"reservation_id": "r1"}
+		return nil
+	}); err != nil {
+		t.Fatalf("BindSymbol: %v", err)
+	}
+
+	src := `[
+		{"let":{"reserve":{"zero":"map<string,any>"}}},
+		{"expr":{"call":{"fn":{"symbol":"orders.FillReserveMap"},"args":[
+			{"out":"reserve"}
+		]}}},
+		{"return":{"map.value":[
+			{"var":"reserve"},
+			{"literal":{"type":"string","value":"reservation_id"}}
+		]}}
+	]`
+	got, err := runSrcWithRegistry(t, src, reg, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got.TypeName() != types.TAny || got.Go() != "r1" {
+		t.Fatalf("want any=r1, got %s=%v", got.TypeName(), got.Go())
+	}
+}
+
 func TestSymbolCanPassFunctionToHostAnyAndConcreteFunc(t *testing.T) {
 	reg := registry.New()
 	if err := reg.BindSymbol("demo.Upper", func(s string) string {

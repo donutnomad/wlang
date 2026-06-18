@@ -4,6 +4,7 @@ package wflang
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"sync"
 
 	"github.com/donutnomad/wlang/ast"
@@ -627,7 +628,59 @@ func wrap(v any) types.Value {
 	case float64:
 		return types.NewValue(types.TFloat64, x)
 	}
+	if mapType, ok := goMapTypeName(reflect.TypeOf(v)); ok {
+		return types.NewValue(mapType, v)
+	}
 	return types.NewValue(types.AutoHostTypeNameOf(v), v)
+}
+
+func goMapTypeName(rt reflect.Type) (string, bool) {
+	if rt == nil || rt.Kind() != reflect.Map {
+		return "", false
+	}
+	key, ok := goReflectTypeName(rt.Key())
+	if !ok {
+		return "", false
+	}
+	val, ok := goReflectTypeName(rt.Elem())
+	if !ok {
+		return "", false
+	}
+	return types.MapType(key, val), true
+}
+
+func goReflectTypeName(rt reflect.Type) (string, bool) {
+	switch rt.Kind() {
+	case reflect.String:
+		return types.TString, true
+	case reflect.Bool:
+		return types.TBoolean, true
+	case reflect.Int64:
+		return types.TInt64, true
+	case reflect.Int8:
+		return types.TInt8, true
+	case reflect.Int16:
+		return types.TInt16, true
+	case reflect.Int32:
+		return types.TInt32, true
+	case reflect.Uint8:
+		return types.TUint8, true
+	case reflect.Uint16:
+		return types.TUint16, true
+	case reflect.Uint32:
+		return types.TUint32, true
+	case reflect.Uint64:
+		return types.TUint64, true
+	case reflect.Float32:
+		return types.TFloat32, true
+	case reflect.Float64:
+		return types.TFloat64, true
+	case reflect.Interface:
+		if rt.NumMethod() == 0 {
+			return types.TAny, true
+		}
+	}
+	return "", false
 }
 
 // withPackages returns a registry copy extended with per-run packages.
