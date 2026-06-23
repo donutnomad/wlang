@@ -38,6 +38,37 @@ func TestCompile_ConstantFolding(t *testing.T) {
 	_ = json.RawMessage{}
 }
 
+func TestParseProgram_MapTypeArrayFromGo2WlangShape(t *testing.T) {
+	cases := []string{
+		`{
+		  "map": {
+		    "type": ["string", "any"],
+		    "entries": [[
+		      {"literal":{"type":"string","value":"k"}},
+		      {"var":"v"}
+		    ]]
+		  }
+		}`,
+		`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"let":{"reserveIn":{"map":{
+	      "type":["string","any"],
+	      "entries":[[
+	        {"literal":{"type":"string","value":"k"}},
+	        {"var":"v"}
+	      ]]
+	    }}}}
+	  ]
+	}`,
+	}
+	for _, src := range cases {
+		if _, err := compiler.ParseProgram([]byte(src)); err != nil {
+			t.Fatalf("parse: %v\n%s", err, src)
+		}
+	}
+}
+
 // §7 骨架: Compile 无优化 flag 时等价于 ParseProgram。
 func TestCompile_NoOptEquivalentToParse(t *testing.T) {
 	src := []byte(`[{"return":{"literal":{"type":"int64","value":"42"}}}]`)

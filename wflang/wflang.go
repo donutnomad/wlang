@@ -22,6 +22,9 @@ type Value = types.Value
 // Budget is re-exported for convenience.
 type Budget = runtime.Budget
 
+// StepHook is called before each statement executes.
+type StepHook = runtime.StepHook
+
 // Registry is re-exported for convenience.
 type Registry = registry.Registry
 
@@ -84,6 +87,7 @@ type RunOptions struct {
 	Vars       map[string]any
 	VarOptions map[string]VarOptions
 	Packages   map[string]PackageSpec
+	OnStep     StepHook
 }
 
 // SessionOptions configures a new Session.
@@ -92,6 +96,7 @@ type SessionOptions struct {
 	VarOptions          map[string]VarOptions
 	Packages            map[string]PackageSpec
 	RoutineErrorHandler func(ctx context.Context, err error)
+	OnStep              StepHook
 	// Lang declares the wflang language version of this session
 	// (LANGUAGE.md §3.1). Defaults to "wflang/v1" when empty.
 	Lang string
@@ -352,6 +357,7 @@ func (p *Program) Run(ctx context.Context, opts RunOptions) (Value, error) {
 	}
 	ctx = registry.WithCapabilities(ctx, p.engine.opts.Capabilities)
 	exec := runtime.NewExecutor(ctx, scope, reg, availablePkgNames(reg), p.engine.opts.Budget)
+	exec.OnStep = opts.OnStep
 	return exec.RunProgram(p.prog)
 }
 
@@ -379,6 +385,7 @@ func (e *Engine) NewSession(opts SessionOptions) (*Session, error) {
 		reg:      reg,
 		finished: false,
 		onErr:    opts.RoutineErrorHandler,
+		onStep:   opts.OnStep,
 		lang:     lang,
 		imports:  imports,
 	}, nil
@@ -392,6 +399,7 @@ type Session struct {
 	finished bool
 	result   Value
 	onErr    func(ctx context.Context, err error)
+	onStep   StepHook
 
 	metaMu  sync.Mutex
 	lang    string
@@ -458,6 +466,7 @@ func (s *Session) AppendRun(ctx context.Context, data []byte) (Value, error) {
 	ctx = registry.WithCapabilities(ctx, s.engine.opts.Capabilities)
 	exec := runtime.NewExecutor(ctx, s.scope, s.reg,
 		availablePkgNames(s.reg), s.engine.opts.Budget)
+	exec.OnStep = s.onStep
 	// Bridge SessionOptions handlers → Executor routine handlers (§5.2 / §8).
 	var rtErr runtime.RoutineErrorHandler
 	if s.onErr != nil {

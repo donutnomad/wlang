@@ -90,6 +90,10 @@ type Budget struct {
 // RoutineErrorHandler observes errors raised inside a fire-and-forget routine.
 type RoutineErrorHandler func(ctx context.Context, err error)
 
+// StepHook observes a statement before it executes. Returning an error stops
+// execution and returns that error to the caller.
+type StepHook func(node ast.Node, scope *Scope) error
+
 // Executor runs statements within a scope chain.
 type Executor struct {
 	ctx          context.Context
@@ -103,6 +107,7 @@ type Executor struct {
 	maxLoopCtx   int // current loop depth for break/continue validity
 	routineCount atomicInt32
 	onRoutineErr RoutineErrorHandler
+	OnStep       StepHook
 }
 
 // RoutineHandle is a reusable future-like value returned by routine.
@@ -185,6 +190,11 @@ func (e *Executor) tickStep() error {
 func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 	if err := e.tickStep(); err != nil {
 		return types.Value{}, sigNone, err
+	}
+	if e.OnStep != nil {
+		if err := e.OnStep(n, e.scope); err != nil {
+			return types.Value{}, sigNone, err
+		}
 	}
 	switch x := n.(type) {
 	case *ast.Let:
@@ -939,6 +949,7 @@ func (e *Executor) evalRoutine(x *ast.Routine) (types.Value, error) {
 			registry: e.registry,
 			pkgs:     e.pkgs,
 			budget:   e.budget,
+			OnStep:   e.OnStep,
 		}
 		go func() {
 			defer func() {
@@ -970,6 +981,7 @@ func (e *Executor) evalRoutine(x *ast.Routine) (types.Value, error) {
 		registry: e.registry,
 		pkgs:     e.pkgs,
 		budget:   e.budget,
+		OnStep:   e.OnStep,
 	}
 	child.scope = NewScope()
 	go func() {

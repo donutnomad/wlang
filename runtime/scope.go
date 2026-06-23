@@ -96,6 +96,22 @@ func (s *Scope) LetWritable(name string, v types.Value) {
 	s.vars[name] = &varBinding{val: v, writable: true}
 }
 
+// AllVars returns a snapshot of variables visible from this scope.
+// Child bindings override parent bindings with the same name.
+func (s *Scope) AllVars() map[string]types.Value {
+	out := map[string]types.Value{}
+	var chain []*Scope
+	for cur := s; cur != nil; cur = cur.parent {
+		chain = append(chain, cur)
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		for name, binding := range chain[i].vars {
+			out[name] = binding.val
+		}
+	}
+	return out
+}
+
 // Set searches outward and updates the binding. Returns E_READONLY_VAR / E_SYMBOL.
 func (s *Scope) Set(name string, v types.Value) error {
 	for cur := s; cur != nil; cur = cur.parent {

@@ -1204,6 +1204,7 @@ func (e *Engine) TraceProgram(ctx context.Context, src []byte,
 	tr.inner = reg
 	ctx = registry.WithCapabilities(ctx, e.opts.Capabilities)
 	exec := runtime.NewExecutor(ctx, scope, tr, availablePkgNames(reg), e.opts.Budget)
+	exec.OnStep = opts.OnStep
 	v, err := exec.RunProgram(prog.prog)
 	return v, tr.events, err
 }

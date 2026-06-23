@@ -124,6 +124,29 @@ func TestTC055_TopLevelWritable(t *testing.T) {
 	}
 }
 
+func TestScopeAllVarsIncludesParentsAndChildOverrides(t *testing.T) {
+	root := NewScope()
+	root.Let("shared", types.NewValue(types.TString, "root"), "")
+	root.Let("rootOnly", types.NewValue(types.TInt64, int64(1)), "")
+	child := root.Push()
+	child.Let("shared", types.NewValue(types.TString, "child"), "")
+	child.Let("childOnly", types.NewValue(types.TBoolean, true), "")
+
+	got := child.AllVars()
+	if len(got) != 3 {
+		t.Fatalf("want 3 vars, got %d: %#v", len(got), got)
+	}
+	if got["shared"].Go() != "child" {
+		t.Fatalf("shared should come from child scope, got %v", got["shared"].Go())
+	}
+	if got["rootOnly"].Go() != int64(1) {
+		t.Fatalf("rootOnly mismatch: %v", got["rootOnly"].Go())
+	}
+	if got["childOnly"].Go() != true {
+		t.Fatalf("childOnly mismatch: %v", got["childOnly"].Go())
+	}
+}
+
 // TC-050 PushScope / PopScope 嵌套：内层 let 不影响外层
 func TestTC050_ScopePopDiscardsInner(t *testing.T) {
 	// Outer block declares x, inner if.then also declares x locally (shadow)
