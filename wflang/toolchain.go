@@ -110,6 +110,33 @@ func dumpNode(n ast.Node) (any, error) {
 			items = append(items, d)
 		}
 		return map[string]any{"array": map[string]any{"elem": x.Elem, "items": items}}, nil
+	case *ast.FuncLit:
+		params := make([]any, 0, len(x.Params))
+		for _, p := range x.Params {
+			params = append(params, []any{p.Name, p.Type})
+		}
+		body, err := dumpNodeList(x.Body)
+		if err != nil {
+			return nil, err
+		}
+		fn := map[string]any{
+			"params": params,
+			"do":     body,
+		}
+		if len(x.Returns) > 0 {
+			fn["returns"] = anySlice(x.Returns)
+		}
+		return map[string]any{"fn": fn}, nil
+	case *ast.FuncCall:
+		fn, err := dumpNode(x.Fn)
+		if err != nil {
+			return nil, err
+		}
+		args, err := dumpNodeList(x.Args)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"call": map[string]any{"fn": fn, "args": args}}, nil
 	case *ast.IfStmt:
 		return dumpIf(x.Cond, x.Then, x.Else)
 	case *ast.IfExpr:
@@ -131,6 +158,28 @@ func dumpNode(n ast.Node) (any, error) {
 		}
 		return map[string]any{x.Op: args}, nil
 	case *ast.Let:
+		if x.Destructure != nil {
+			names := make([]any, len(x.Destructure.Names))
+			for i, name := range x.Destructure.Names {
+				names[i] = name
+			}
+			expr, err := dumpNode(x.Expr)
+			if err != nil {
+				return nil, err
+			}
+			if hasLetDestructureTypes(x.Destructure.Types) {
+				types := make([]any, len(x.Destructure.Names))
+				for i := range x.Destructure.Names {
+					if i < len(x.Destructure.Types) {
+						types[i] = x.Destructure.Types[i]
+					} else {
+						types[i] = ""
+					}
+				}
+				return map[string]any{"let": []any{names, types, expr}}, nil
+			}
+			return map[string]any{"let": []any{names, expr}}, nil
+		}
 		body := map[string]any{}
 		bindings := x.Bindings
 		if len(bindings) == 0 {
@@ -155,6 +204,9 @@ func dumpNode(n ast.Node) (any, error) {
 		}
 		return map[string]any{"set": map[string]any{x.Name: ed}}, nil
 	case *ast.Return:
+		if x.Named != "" {
+			return map[string]any{"return": map[string]any{"named": x.Named}}, nil
+		}
 		ed, err := dumpNode(x.Expr)
 		if err != nil {
 			return nil, err
@@ -225,8 +277,150 @@ func dumpNode(n ast.Node) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"routine": map[string]any{"do": body}}, nil
+	case *ast.Defer:
+		expr := x.Expr
+		if expr == nil {
+			expr = x.Call
+		}
+		ed, err := dumpNode(expr)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"defer": ed}, nil
+	case *ast.MapLit:
+		entries := make([]any, 0, len(x.Entries))
+		for _, ent := range x.Entries {
+			k, err := dumpNode(ent.Key)
+			if err != nil {
+				return nil, err
+			}
+			v, err := dumpNode(ent.Val)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, []any{k, v})
+		}
+		return map[string]any{"map": map[string]any{
+			"type":    []any{x.KeyType, x.ValType},
+			"entries": entries,
+		}}, nil
+	case *ast.StructLit:
+		fields := map[string]any{}
+		for _, field := range x.Fields {
+			d, err := dumpNode(field.Expr)
+			if err != nil {
+				return nil, err
+			}
+			fields[field.Name] = d
+		}
+		return map[string]any{"struct": []any{x.TypeName, fields}}, nil
+	case *ast.ChanLit:
+		body := []any{x.ElemType}
+		if x.Buffer != nil {
+			buf, err := dumpNode(x.Buffer)
+			if err != nil {
+				return nil, err
+			}
+			body = append(body, buf)
+		}
+		return map[string]any{"chan": body}, nil
+	case *ast.SelectStmt:
+		cases := make([]any, 0, len(x.Cases)+1)
+		for _, c := range x.Cases {
+			d, err := dumpSelectCase(c)
+			if err != nil {
+				return nil, err
+			}
+			cases = append(cases, d)
+		}
+		if x.Default != nil {
+			def, err := dumpNodeList(x.Default)
+			if err != nil {
+				return nil, err
+			}
+			cases = append(cases, map[string]any{"default": def})
+		}
+		return map[string]any{"select": cases}, nil
+	case *ast.Match:
+		value, err := dumpNode(x.Value)
+		if err != nil {
+			return nil, err
+		}
+		cases := make([]any, 0, len(x.Cases))
+		for _, c := range x.Cases {
+			when, err := dumpNode(c.When)
+			if err != nil {
+				return nil, err
+			}
+			do, err := dumpNodeList(c.Do)
+			if err != nil {
+				return nil, err
+			}
+			cases = append(cases, map[string]any{"when": when, "do": do})
+		}
+		body := map[string]any{"value": value, "cases": cases}
+		if x.Default != nil {
+			def, err := dumpNodeList(x.Default)
+			if err != nil {
+				return nil, err
+			}
+			body["default"] = def
+		}
+		return map[string]any{"match": body}, nil
 	}
 	return nil, werr.Newf(werr.CodeASTShape, "DumpAST: unsupported node %T", n)
+}
+
+func hasLetDestructureTypes(types []string) bool {
+	for _, typ := range types {
+		if typ != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func dumpSelectCase(c ast.SelectCase) (any, error) {
+	body := map[string]any{}
+	switch c.Kind {
+	case ast.SelectCaseRecv:
+		ch, err := dumpNode(c.Chan)
+		if err != nil {
+			return nil, err
+		}
+		body["recv"] = []any{ch}
+		if c.BindVal != "" || c.BindOK != "" {
+			bind := []any{}
+			if c.BindVal != "" {
+				bind = append(bind, c.BindVal)
+			}
+			if c.BindOK != "" {
+				for len(bind) < 1 {
+					bind = append(bind, "")
+				}
+				bind = append(bind, c.BindOK)
+			}
+			body["bind"] = bind
+		}
+	case ast.SelectCaseSend:
+		ch, err := dumpNode(c.Chan)
+		if err != nil {
+			return nil, err
+		}
+		val, err := dumpNode(c.SendExpr)
+		if err != nil {
+			return nil, err
+		}
+		body["send"] = []any{ch, val}
+	default:
+		return nil, werr.Newf(werr.CodeASTShape, "DumpAST: unsupported select case kind %d", c.Kind)
+	}
+	do, err := dumpNodeList(c.Do)
+	if err != nil {
+		return nil, err
+	}
+	body["do"] = do
+	return map[string]any{"case": body}, nil
 }
 
 func dumpNodeList(ns []ast.Node) ([]any, error) {

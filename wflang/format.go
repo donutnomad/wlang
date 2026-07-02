@@ -104,15 +104,22 @@ func FormatPseudoCode(src []byte) ([]byte, error) {
 	}
 	f := pseudoFormatter{}
 	f.program(prog)
+	if f.err != nil {
+		return nil, f.err
+	}
 	return []byte(strings.TrimRight(f.buf.String(), "\n")), nil
 }
 
 type pseudoFormatter struct {
-	buf bytes.Buffer
+	buf     bytes.Buffer
+	imports map[string]bool
+	err     error
 }
 
 func (f *pseudoFormatter) program(p *ast.Program) {
+	f.imports = map[string]bool{}
 	for _, im := range p.Imports {
+		f.imports[im] = true
 		f.line(0, "import "+im)
 	}
 	if len(p.Imports) > 0 && len(p.Body) > 0 {
@@ -255,6 +262,9 @@ func (f *pseudoFormatter) mapMutationStmt(n ast.Node) (string, bool) {
 		if len(c.Args) != 3 {
 			return "", false
 		}
+		if !isStringLiteralNode(c.Args[1]) {
+			return canonicalDisplayOp(c.Op) + "(" + f.exprList(c.Args) + ")", true
+		}
 		return fmt.Sprintf("%s[%s] = %s", f.expr(c.Args[0]), f.expr(c.Args[1]), f.expr(c.Args[2])), true
 	case "map.del":
 		if len(c.Args) != 2 {
@@ -274,13 +284,23 @@ func (f *pseudoFormatter) arraySetStmt(n ast.Node) (string, bool) {
 }
 
 func selectBindList(names ...string) string {
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		if name != "" {
-			out = append(out, name)
-		}
+	first, second := "", ""
+	if len(names) > 0 {
+		first = names[0]
 	}
-	return strings.Join(out, ", ")
+	if len(names) > 1 {
+		second = names[1]
+	}
+	if first == "" && second == "" {
+		return ""
+	}
+	if first == "" && second != "" {
+		first = "_"
+	}
+	if second == "" {
+		return first
+	}
+	return first + ", " + second
 }
 
 func (f *pseudoFormatter) expr(n ast.Node) string {
@@ -299,7 +319,11 @@ func (f *pseudoFormatter) expr(n ast.Node) string {
 	case *ast.Symbol:
 		return "symbol " + x.Name
 	case *ast.MethodValue:
-		return f.expr(x.Receiver) + "." + x.Name
+		recv := f.expr(x.Receiver)
+		if _, ok := x.Receiver.(*ast.Var); !ok {
+			recv = "(" + recv + ")"
+		}
+		return "method " + recv + "." + x.Name
 	case *ast.Out:
 		return "&" + x.Name
 	case *ast.Zero:
@@ -358,13 +382,22 @@ func (f *pseudoFormatter) expr(n ast.Node) string {
 		}
 		b.WriteString("}")
 		return b.String()
+	case *ast.IfStmt:
+		return f.unsupportedExpr("if expression")
 	case *ast.IfExpr:
-		return "<if>"
+		return f.unsupportedExpr("if expression")
 	case *ast.SelectStmt:
-		return "<select>"
+		return f.unsupportedExpr("select expression")
 	default:
 		return fmt.Sprintf("<%T>", n)
 	}
+}
+
+func (f *pseudoFormatter) unsupportedExpr(name string) string {
+	if f.err == nil {
+		f.err = werr.Newf(werr.CodeASTShape, "unsupported pseudocode expression: %s", name)
+	}
+	return "<unsupported>"
 }
 
 func (f *pseudoFormatter) callExpr(c *ast.Call) string {
@@ -372,11 +405,7 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 		return "<nil-call>"
 	}
 	if isInfixOp(c.Op) && len(c.Args) >= 2 {
-		parts := make([]string, len(c.Args))
-		for i, arg := range c.Args {
-			parts[i] = f.expr(arg)
-		}
-		return strings.Join(parts, " "+c.Op+" ")
+		return f.infixExpr(c)
 	}
 	if isPrefixOp(c.Op) && len(c.Args) == 1 {
 		return c.Op + f.expr(c.Args[0])
@@ -392,11 +421,46 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 	}
 	if len(c.Args) > 0 {
 		if pkg, ok := c.Args[0].(*ast.Pkg); ok {
-			return pkg.Name + "." + c.Op + "(" + f.exprList(c.Args[1:]) + ")"
+			head := pkg.Name + "." + c.Op
+			if f.explicitPkgCall(pkg.Name) {
+				head = "pkg " + head
+			}
+			return head + "(" + f.exprList(c.Args[1:]) + ")"
 		}
 		return f.expr(c.Args[0]) + "." + c.Op + "(" + f.exprList(c.Args[1:]) + ")"
 	}
 	return c.Op + "(" + f.exprList(c.Args) + ")"
+}
+
+func (f *pseudoFormatter) infixExpr(c *ast.Call) string {
+	parts := make([]string, len(c.Args))
+	parent := infixPrecedence(c.Op)
+	for i, arg := range c.Args {
+		part := f.expr(arg)
+		if child, ok := arg.(*ast.Call); ok && isInfixOp(child.Op) {
+			childPrec := infixPrecedence(child.Op)
+			if childPrec < parent ||
+				(childPrec == parent && child.Op != c.Op) ||
+				(childPrec == parent && child.Op == c.Op && i > 0) {
+				part = "(" + part + ")"
+			}
+		}
+		if _, ok := arg.(*ast.Zero); ok {
+			part = "(" + part + ")"
+		}
+		if v, ok := arg.(*ast.Var); ok && v.Default != nil {
+			part = "(" + part + ")"
+		}
+		parts[i] = part
+	}
+	return strings.Join(parts, " "+c.Op+" ")
+}
+
+func (f *pseudoFormatter) explicitPkgCall(name string) bool {
+	if f.imports != nil && f.imports[name] {
+		return false
+	}
+	return !isLikelyPackageRoot(name)
 }
 
 func (f *pseudoFormatter) arrayBuiltinExpr(c *ast.Call) (string, bool) {
@@ -422,13 +486,26 @@ func (f *pseudoFormatter) arrayBuiltinExpr(c *ast.Call) (string, bool) {
 
 func (f *pseudoFormatter) mapBuiltinExpr(c *ast.Call) (string, bool) {
 	switch canonicalMapOp(c.Op) {
-	case "map.get", "map.value":
+	case "map.get":
 		if len(c.Args) != 2 {
 			return "", false
+		}
+		return canonicalDisplayOp(c.Op) + "(" + f.exprList(c.Args) + ")", true
+	case "map.value":
+		if len(c.Args) != 2 {
+			return "", false
+		}
+		if !isStringLiteralNode(c.Args[1]) {
+			return canonicalDisplayOp(c.Op) + "(" + f.exprList(c.Args) + ")", true
 		}
 		return fmt.Sprintf("%s[%s]", f.expr(c.Args[0]), f.expr(c.Args[1])), true
 	}
 	return "", false
+}
+
+func isStringLiteralNode(n ast.Node) bool {
+	lit, ok := n.(*ast.Literal)
+	return ok && lit.Value.TypeName() == types.TString
 }
 
 func canonicalMapOp(op string) string {
@@ -532,6 +609,22 @@ func isInfixOp(op string) bool {
 		return true
 	}
 	return false
+}
+
+func infixPrecedence(op string) int {
+	switch op {
+	case "or":
+		return 1
+	case "and":
+		return 2
+	case "==", "!=", ">", ">=", "<", "<=", "contains", "startsWith", "endsWith":
+		return 3
+	case "+", "-":
+		return 4
+	case "*", "/":
+		return 5
+	}
+	return 0
 }
 
 func isPrefixOp(op string) bool {

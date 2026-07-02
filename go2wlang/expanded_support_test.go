@@ -85,7 +85,7 @@ func Rule(m map[string]int64, xs []int64, p *int64) int64 {
 }
 `)
 	for _, needle := range []string{
-		"let v, ok = m[\"a\"]",
+		"let v, ok = map.get(m, \"a\")",
 		"m[\"b\"] = 0 - v",
 		"xs[0] = v",
 		"xs[1:3]",

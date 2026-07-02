@@ -640,7 +640,7 @@ func TestExampleFeatureShowcaseTranslates(t *testing.T) {
 		"let pair = struct examples.ShowcaseItem {",
 		"pair.Name = call symbol examples.Identity(pair.Name)",
 		"scores[0] = n",
-		"let val, ok = labels[\"primary\"]",
+		"let val, ok = map.get(labels, \"primary\")",
 		"labels[\"copy\"] = val",
 		"delete(labels, \"primary\")",
 		"let part = scores[0:1]",

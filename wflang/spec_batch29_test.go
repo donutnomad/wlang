@@ -165,6 +165,103 @@ func TestDumpAST_AwaitRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDumpAST_RoundTripsAdvancedPseudoSurfaces(t *testing.T) {
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: wflang.DefaultRegistry()})
+	src := []byte(`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"let":{"title":{"literal":{"type":"string","value":"demo"}}}},
+	    {"defer":{"Close":[{"pkg":"audit"},{"var":"title"}]}},
+	    {"let":{"events":{"chan":["string",{"literal":{"type":"int64","value":"1"}}]}}},
+	    {"select":[
+	      {"case":{"recv":[{"var":"events"}],"bind":["event","ok"],"do":[{"set":{"title":{"+":[{"var":"title"},{"var":"event"}]}}}]}},
+	      {"case":{"send":[{"var":"events"},{"literal":{"type":"string","value":"done"}}],"do":[{"break":true}]}},
+	      {"default":[{"set":{"title":{"literal":{"type":"string","value":"idle"}}}}]}
+	    ]},
+	    {"let":{"f":{"fn":{
+	      "params":[["delta","int64"]],
+	      "returns":["int64"],
+	      "do":[{"return":{"+":[{"var":"delta"},{"literal":{"type":"int64","value":"1"}}]}}]
+	    }}}},
+	    {"defer":{"call":{"fn":{"var":"f"},"args":[{"literal":{"type":"int64","value":"2"}}]}}},
+	    {"let":{"next":{"call":{"fn":{"var":"f"},"args":[{"literal":{"type":"int64","value":"1"}}]}}}},
+	    {"let":{"labels":{"map":{
+	      "type":["string","any"],
+	      "entries":[[
+	        {"literal":{"type":"string","value":"reservation_id"}},
+	        {"map.value":[{"var":"reserve"},{"literal":{"type":"string","value":"reservation_id"}}]}
+	      ]]
+	    }}}},
+	    {"let":{"user":{"struct":["demo.User",{
+	      "Age":{"literal":{"type":"int64","value":"29"}},
+	      "Name":{"literal":{"type":"string","value":"alice"}}
+	    }]}}},
+	    {"let":{"decision":{"match":{
+	      "value":{"var":"next"},
+	      "cases":[{"when":{"literal":{"type":"int64","value":"1"}},"do":[{"return":{"literal":{"type":"string","value":"one"}}}]}],
+	      "default":[{"return":{"literal":{"type":"string","value":"other"}}}]
+	    }}}}
+	  ]
+	}`)
+	dumped, pseudo := dumpASTRoundTripPseudo(t, eng, src)
+	for _, want := range []string{
+		"defer audit.Close(title)",
+		"let events = chan<string>(1)",
+		"select {",
+		"send events <- \"done\" {",
+		"let f = fn(delta: int64) -> int64 {",
+		"defer call f(2)",
+		"let next = call f(1)",
+		"let labels = map<string,any> {",
+		"let user = struct demo.User {",
+		"let decision = match next {",
+	} {
+		if !strings.Contains(pseudo, want) {
+			t.Fatalf("dumped pseudo missing %q\npseudo:\n%s\n\ndump:\n%s", want, pseudo, dumped)
+		}
+	}
+}
+
+func TestDumpAST_RoundTripsTupleDestructureAndNamedReturn(t *testing.T) {
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: wflang.DefaultRegistry()})
+	src := []byte(`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"let":[["value","_"],["string","error"],{"Echo":[{"pkg":"worker"},{"literal":{"type":"string","value":"async"}}]}]},
+	    {"return":{"named":"err"}}
+	  ]
+	}`)
+	dumped, pseudo := dumpASTRoundTripPseudo(t, eng, src)
+	for _, want := range []string{
+		"let value: string, _: error = worker.Echo(\"async\")",
+		"return named err",
+	} {
+		if !strings.Contains(pseudo, want) {
+			t.Fatalf("dumped pseudo missing %q\npseudo:\n%s\n\ndump:\n%s", want, pseudo, dumped)
+		}
+	}
+}
+
+func dumpASTRoundTripPseudo(t *testing.T, eng *wflang.Engine, src []byte) ([]byte, string) {
+	t.Helper()
+	prog, err := eng.CompileJSON(src)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	dumped, err := wflang.DumpAST(prog)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if _, err := eng.CompileJSON(dumped); err != nil {
+		t.Fatalf("compile dumped: %v\n%s", err, dumped)
+	}
+	pseudo, err := wflang.FormatPseudoCode(dumped)
+	if err != nil {
+		t.Fatalf("format dumped pseudo: %v\n%s", err, dumped)
+	}
+	return dumped, string(pseudo)
+}
+
 func TestTC832_DumpTypedAST(t *testing.T) {
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: wflang.DefaultRegistry()})
 	src := []byte(`[{"return":{"literal":{"type":"int64","value":"7"}}}]`)

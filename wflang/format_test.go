@@ -197,7 +197,7 @@ func TestFormatPseudoCode_MapBuiltinSugar(t *testing.T) {
 	}
 	got := string(out)
 	want := strings.Join([]string{
-		"let val, ok = labels[\"primary\"]",
+		"let val, ok = map.get(labels, \"primary\")",
 		"let current = labels[\"copy\"]",
 		"labels[\"copy\"] = val",
 		"delete(labels, \"primary\")",

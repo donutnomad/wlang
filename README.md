@@ -243,14 +243,16 @@ Detailed translator documentation:
 
 ## Formatter
 
-`wlfmt` renders executable JSON as stable JSON or pseudocode:
+`wlfmt` renders executable JSON as stable JSON or pseudocode, and can compile
+pseudocode back to canonical JSON:
 
 ```bash
 go run ./cmd/wlfmt examples/full_feature_demo.json
 go run ./cmd/wlfmt -json examples/full_feature_demo.json
+go run ./cmd/wlfmt -text -json rule.wl
 ```
 
-`go2wl -pseudo` uses the same formatter so generated JSON can be reviewed in a compact, Go-like form.
+`go2wl -pseudo` uses the same formatter so generated JSON can be reviewed in a compact, Go-like form. The same surface can be parsed through `wflang.CompileText`.
 
 ## Security Model
 

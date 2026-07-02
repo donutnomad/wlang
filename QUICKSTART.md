@@ -24,7 +24,7 @@ GOCACHE=/private/tmp/wlang-gocache go run ./cmd/go2wl -func FeatureShowcase go2w
 
 ## 2. JSON 和 pseudo 的关系
 
-wlang 的可执行形态是 JSON。pseudo 是 review/debug 视图，由 formatter 从同一份 JSON 生成。
+wlang 的可执行形态是 JSON。pseudo 是 Go-like 的 author/review 视图，可以由 formatter 从 JSON 生成，也可以通过 `wflang.CompileText` 或 `wlfmt -text -json` 编译回 JSON。
 
 Go:
 

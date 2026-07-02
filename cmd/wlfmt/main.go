@@ -11,8 +11,9 @@ import (
 
 func main() {
 	jsonMode := flag.Bool("json", false, "format as stable JSON instead of pseudocode")
+	textMode := flag.Bool("text", false, "read wflang pseudocode instead of JSON")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: wlfmt [-json] [file]\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: wlfmt [-text] [-json] [file]\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -24,7 +25,12 @@ func main() {
 	}
 
 	var out []byte
-	if *jsonMode {
+	if *textMode {
+		out, err = wflang.CompileText(src)
+		if err == nil && !*jsonMode {
+			out, err = wflang.FormatPseudoCode(out)
+		}
+	} else if *jsonMode {
 		out, err = wflang.FormatJSON(src)
 	} else {
 		out, err = wflang.FormatPseudoCode(src)
