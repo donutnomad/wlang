@@ -373,11 +373,7 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 				return []any{map[string]any{"panic": arg}}, nil
 			}
 		}
-		ex, err := t.expr(x.X)
-		if err != nil {
-			return nil, err
-		}
-		return []any{map[string]any{"expr": ex}}, nil
+		return t.exprStmt(x.X)
 	case *ast.DeferStmt:
 		c, err := t.expr(x.Call)
 		if err != nil {
@@ -415,6 +411,14 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 	default:
 		return nil, t.unsupported(s, "statement is not supported", "keep this code in a Go host function")
 	}
+}
+
+func (t *translator) exprStmt(e ast.Expr) ([]any, error) {
+	ex, err := t.expr(e)
+	if err != nil {
+		return nil, err
+	}
+	return []any{map[string]any{"expr": ex}}, nil
 }
 
 func (t *translator) varDecl(decl *ast.GenDecl) ([]any, error) {
@@ -737,6 +741,9 @@ func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 		}
 		name := id.Name
 		if name == "_" {
+			if call, ok := x.Rhs[0].(*ast.CallExpr); ok {
+				return t.exprStmt(call)
+			}
 			return nil, nil
 		}
 		if call, ok := x.Rhs[0].(*ast.CallExpr); ok && isIdentCall(call, "append") {

@@ -663,3 +663,73 @@ func TestExampleFeatureShowcaseTranslates(t *testing.T) {
 		}
 	}
 }
+
+func Test_BlankAssignToCallExpr_TranslatesAsExpressionStatement(t *testing.T) {
+	cases := []struct {
+		name   string
+		src    string
+		expect string
+	}{
+		{
+			name:   "chained activity call discarded",
+			expect: `"Get": [`,
+			src: `package rules
+
+import "example.com/workflow"
+import "example.com/activities"
+
+func OrderWorkflow(ctx workflow.Context, input string) error {
+	var out string
+	_ = workflow.ExecuteActivity(ctx, activities.Reserve, input).Get(ctx, &out)
+	return nil
+}
+`,
+		},
+		{
+			name:   "plain call discarded",
+			expect: `"Notify": [`,
+			src: `package rules
+
+import "example.com/demo"
+
+func Rule(user demo.User) error {
+	_ = demo.Notify(user)
+	return nil
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			funcName := "Rule"
+			if strings.Contains(tc.src, "func OrderWorkflow") {
+				funcName = "OrderWorkflow"
+			}
+			out, err := go2wlang.TranslateFile([]byte(tc.src), go2wlang.Options{FuncName: funcName})
+			if err != nil {
+				t.Fatalf("TranslateFile: %v", err)
+			}
+			got := string(out)
+			if !strings.Contains(got, `"expr":`) || !strings.Contains(got, tc.expect) {
+				t.Fatalf("blank-assigned call should translate as expr statement, got:\n%s", got)
+			}
+		})
+	}
+}
+
+func Test_BlankAssignToPureValue_StillAllowed(t *testing.T) {
+	src := []byte(`package rules
+
+func Rule(scores []int64) int64 {
+	total := int64(0)
+	for _, score := range scores {
+		total = total + score
+	}
+	_ = total
+	return total
+}
+`)
+	if _, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"}); err != nil {
+		t.Fatalf("`_ = <pure value>` should still translate, got: %v", err)
+	}
+}
