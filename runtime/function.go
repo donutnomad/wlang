@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -66,6 +67,30 @@ func (e *Executor) prepareFuncCall(x *ast.FuncCall) (preparedFuncCall, error) {
 		args = append(args, v)
 	}
 	return preparedFuncCall{fn: fn, args: args, path: x.Path()}, nil
+}
+
+// InvokeClosure lets a Go host call a wflang closure value with a set of
+// already-evaluated arguments. It is the dual of CallValue (registry.go, which
+// only accepts a reflect.Func): CallValue invokes a Go function, InvokeClosure
+// invokes a *Closure. Both share the same Executor from one RunProgram, so the
+// outer scope the closure captured stays alive across host invocations.
+//
+// Like the Executor as a whole, this is not concurrency-safe: callers must
+// invoke it serially on a given Executor.
+func (e *Executor) InvokeClosure(cl *Closure, args []types.Value) (types.Value, error) {
+	if cl == nil {
+		return types.Value{}, fmt.Errorf("InvokeClosure: nil closure")
+	}
+	exit, err := e.enterHostCall("<host-invoke-closure>")
+	if err != nil {
+		return types.Value{}, err
+	}
+	defer exit()
+	return e.invokePreparedFuncCall(preparedFuncCall{
+		fn:   types.NewValue(cl.typ, cl),
+		args: args,
+		path: "<host-invoke-closure>",
+	})
 }
 
 func (e *Executor) invokePreparedFuncCall(call preparedFuncCall) (types.Value, error) {

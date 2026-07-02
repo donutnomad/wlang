@@ -42,6 +42,65 @@ func TestFunctionClosureCapturesOuterVariableByReference(t *testing.T) {
 	}
 }
 
+func TestInvokeClosureCallsWflangClosureFromHost(t *testing.T) {
+	// The program only binds `counter` and a closure `f` that increments and
+	// returns `counter` by reference. It does NOT call `f` itself, so the Go
+	// host is responsible for driving the closure via InvokeClosure.
+	src := `[
+		{"let":{"counter":{"literal":{"type":"int64","value":"10"}}}},
+		{"let":{"f":{"fn":{
+			"params":[["delta","int64"]],
+			"returns":["int64"],
+			"do":[
+				{"set":{"counter":{"+":[{"var":"counter"},{"var":"delta"}]}}},
+				{"return":{"var":"counter"}}
+			]
+		}}}}
+	]`
+	prog, err := compiler.ParseProgram([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	scope := NewScope()
+	exec := NewExecutor(context.Background(), scope, nil, nil, Budget{})
+	if _, err := exec.RunProgram(prog); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	fv, ok := scope.Lookup("f")
+	if !ok {
+		t.Fatalf("closure f not found in scope")
+	}
+	cl, ok := fv.Go().(*Closure)
+	if !ok {
+		t.Fatalf("f is not a *Closure, got %T", fv.Go())
+	}
+
+	// First host invocation: counter 10 + 5 -> 15.
+	ret, err := exec.InvokeClosure(cl, []types.Value{types.NewValue(types.TInt64, int64(5))})
+	if err != nil {
+		t.Fatalf("InvokeClosure: %v", err)
+	}
+	if ret.TypeName() != types.TInt64 || ret.Go().(int64) != 15 {
+		t.Fatalf("want int64=15, got %s=%v", ret.TypeName(), ret.Go())
+	}
+
+	// Second host invocation shares the same captured scope: 15 + 7 -> 22.
+	ret2, err := exec.InvokeClosure(cl, []types.Value{types.NewValue(types.TInt64, int64(7))})
+	if err != nil {
+		t.Fatalf("InvokeClosure #2: %v", err)
+	}
+	if ret2.Go().(int64) != 22 {
+		t.Fatalf("want int64=22 on second call, got %v", ret2.Go())
+	}
+
+	// The captured `counter` was mutated by reference through both calls.
+	cv, _ := scope.Lookup("counter")
+	if cv.Go().(int64) != 22 {
+		t.Fatalf("captured counter want 22, got %v", cv.Go())
+	}
+}
+
 func TestDeferredClosureCanUpdateNamedReturn(t *testing.T) {
 	src := `[
 		{"let":{"err":{"literal":{"type":"string","value":"original"}}}},
