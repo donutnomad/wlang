@@ -445,14 +445,17 @@ func (p *textParser) parseTypeName(stops ...string) (string, error) {
 			}
 			return b.String(), nil
 		}
-		if depth == 0 && stop[t.lit] {
-			if b.Len() == 0 {
-				return "", p.err(t, "expected type name")
-			}
-			return b.String(), nil
-		}
 		if t.lit == "<" {
+			if depth == 0 && stop["<"] && !typeNameAcceptsArgs(b.String()) {
+				if b.Len() == 0 {
+					return "", p.err(t, "expected type name")
+				}
+				return b.String(), nil
+			}
 			depth++
+			p.take()
+			b.WriteString(t.lit)
+			continue
 		}
 		if t.lit == ">" {
 			if depth == 0 && stop[">"] {
@@ -462,8 +465,26 @@ func (p *textParser) parseTypeName(stops ...string) (string, error) {
 				return b.String(), nil
 			}
 			depth--
+			p.take()
+			b.WriteString(t.lit)
+			continue
+		}
+		if depth == 0 && stop[t.lit] {
+			if b.Len() == 0 {
+				return "", p.err(t, "expected type name")
+			}
+			return b.String(), nil
 		}
 		p.take()
 		b.WriteString(t.lit)
+	}
+}
+
+func typeNameAcceptsArgs(name string) bool {
+	switch name {
+	case "array", "chan", "func", "map", "tuple":
+		return true
+	default:
+		return false
 	}
 }

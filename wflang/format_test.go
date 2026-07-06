@@ -140,6 +140,131 @@ func TestFormatPseudoCode_ReceiverCallChainUsesDotSyntax(t *testing.T) {
 	}
 }
 
+func TestFormatPseudoCode_LongMultilineCallArgumentsUseSeparateLines(t *testing.T) {
+	src := []byte(`{
+	  "lang":"wflang/v1",
+	  "program":[
+	    {"let":[["results","err"],{"Go":[
+	      {"pkg":"workflow"},
+	      {"var":"ctx"},
+	      {"fn":{
+	        "params":[["ctx","workflow.Context"]],
+	        "returns":["map<string,any>"],
+	        "do":[
+	          {"let":{"in":{"map":{"type":["string","any"],"entries":[
+	            [{"literal":{"type":"string","value":"wallet_address"}},{"literal":{"type":"string","value":"0xHOT1"}}],
+	            [{"literal":{"type":"string","value":"token"}},{"literal":{"type":"string","value":"ETH"}}]
+	          ]}}}},
+	          {"let":{"out":{"zero":"map<string,any>"}}},
+	          {"let":{"e":{"Get":[
+	            {"ExecuteActivity":[
+	              {"pkg":"workflow"},
+	              {"var":"ctx"},
+	              {"symbol":"activities.CheckBalance"},
+	              {"var":"in"}
+	            ]},
+	            {"var":"ctx"},
+	            {"out":"out"}
+	          ]}}},
+	          {"return":{"var":"out"}}
+	        ]
+	      }},
+	      {"fn":{
+	        "params":[["ctx","workflow.Context"]],
+	        "returns":["map<string,any>"],
+	        "do":[
+	          {"let":{"in":{"map":{"type":["string","any"],"entries":[
+	            [{"literal":{"type":"string","value":"wallet_address"}},{"literal":{"type":"string","value":"0xHOT2"}}],
+	            [{"literal":{"type":"string","value":"token"}},{"literal":{"type":"string","value":"USDT"}}]
+	          ]}}}},
+	          {"let":{"out":{"zero":"map<string,any>"}}},
+	          {"let":{"e":{"Get":[
+	            {"ExecuteActivity":[
+	              {"pkg":"workflow"},
+	              {"var":"ctx"},
+	              {"symbol":"activities.CheckBalance"},
+	              {"var":"in"}
+	            ]},
+	            {"var":"ctx"},
+	            {"out":"out"}
+	          ]}}},
+	          {"return":{"var":"out"}}
+	        ]
+	      }},
+	      {"fn":{
+	        "params":[["ctx","workflow.Context"]],
+	        "returns":["map<string,any>"],
+	        "do":[
+	          {"let":{"in":{"map":{"type":["string","any"],"entries":[
+	            [{"literal":{"type":"string","value":"wallet_address"}},{"literal":{"type":"string","value":"0xHOT3"}}],
+	            [{"literal":{"type":"string","value":"token"}},{"literal":{"type":"string","value":"ETH"}}]
+	          ]}}}},
+	          {"let":{"out":{"zero":"map<string,any>"}}},
+	          {"let":{"e":{"Get":[
+	            {"ExecuteActivity":[
+	              {"pkg":"workflow"},
+	              {"var":"ctx"},
+	              {"symbol":"activities.CheckBalance"},
+	              {"var":"in"}
+	            ]},
+	            {"var":"ctx"},
+	            {"out":"out"}
+	          ]}}},
+	          {"return":{"var":"out"}}
+	        ]
+	      }}
+	    ]}]},
+	    {"if":{
+	      "cond":{"!=":[{"var":"err"},{"literal":{"type":"null","value":null}}]},
+	      "then":[{"return":{"var":"err"}}]
+	    }},
+	    {"return":{"literal":{"type":"null","value":null}}}
+	  ]
+	}`)
+	out, err := wflang.FormatPseudoCode(src)
+	if err != nil {
+		t.Fatalf("format pseudo: %v", err)
+	}
+	got := string(out)
+	want := strings.Join([]string{
+		"let results, err = workflow.Go(ctx,",
+		"  fn(ctx: workflow.Context) -> map<string,any> {",
+		"    let in = map<string,any> {",
+		"      \"wallet_address\": \"0xHOT1\"",
+		"      \"token\": \"ETH\"",
+		"    }",
+		"    let out = zero map<string,any>",
+		"    let e = workflow.ExecuteActivity(ctx, symbol activities.CheckBalance, in).Get(ctx, &out)",
+		"    return out",
+		"  },",
+		"  fn(ctx: workflow.Context) -> map<string,any> {",
+		"    let in = map<string,any> {",
+		"      \"wallet_address\": \"0xHOT2\"",
+		"      \"token\": \"USDT\"",
+		"    }",
+		"    let out = zero map<string,any>",
+		"    let e = workflow.ExecuteActivity(ctx, symbol activities.CheckBalance, in).Get(ctx, &out)",
+		"    return out",
+		"  },",
+		"  fn(ctx: workflow.Context) -> map<string,any> {",
+		"    let in = map<string,any> {",
+		"      \"wallet_address\": \"0xHOT3\"",
+		"      \"token\": \"ETH\"",
+		"    }",
+		"    let out = zero map<string,any>",
+		"    let e = workflow.ExecuteActivity(ctx, symbol activities.CheckBalance, in).Get(ctx, &out)",
+		"    return out",
+		"  })",
+		"if err != null {",
+		"  return err",
+		"}",
+		"return null",
+	}, "\n")
+	if got != want {
+		t.Fatalf("pseudo code mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func TestFormatPseudoCode_ArrayBuiltinSugar(t *testing.T) {
 	src := []byte(`{
 	  "lang":"wflang/v1",

@@ -582,6 +582,7 @@ func (p *textParser) parseCallArgs() ([]any, error) {
 
 func (p *textParser) parseExprList(end string) ([]any, error) {
 	var out []any
+	p.skipNewlines()
 	if p.accept(end) {
 		return out, nil
 	}
@@ -591,11 +592,13 @@ func (p *textParser) parseExprList(end string) ([]any, error) {
 			return nil, err
 		}
 		out = append(out, ex)
+		p.skipNewlines()
 		if p.accept(end) {
 			return out, nil
 		}
 		if err := p.expect(","); err != nil {
 			return nil, err
 		}
+		p.skipNewlines()
 	}
 }

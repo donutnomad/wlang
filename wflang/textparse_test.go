@@ -1,6 +1,7 @@
 package wflang_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -120,6 +121,91 @@ func TestCompileText_RoundTripsSymbolsOutZeroArraysDefaultsAndFori(t *testing.T)
 		"let err = workflow.ExecuteActivity(ctx, activity, input).Get(ctx, &reserve)",
 		"let method = method worker.Compensate",
 		"return call method(ctx, &reserve)",
+	}, "\n"))
+
+	out, err := wflang.CompileText(src)
+	if err != nil {
+		t.Fatalf("CompileText: %v", err)
+	}
+	gotPseudo, err := wflang.FormatPseudoCode(out)
+	if err != nil {
+		t.Fatalf("FormatPseudoCode: %v\n%s", err, out)
+	}
+	if string(gotPseudo) != string(src) {
+		t.Fatalf("pseudo mismatch\nwant:\n%s\n\ngot:\n%s\n\njson:\n%s", src, gotPseudo, out)
+	}
+}
+
+func TestCompileText_ParsesZeroBeforeLessThanAsComparison(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		typ  string
+	}{
+		{name: "scalar", src: "let ok = zero int64 < 1", typ: "int64"},
+		{name: "generic", src: "let ok = zero map<string,any> < 1", typ: "map<string,any>"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := wflang.CompileText([]byte(tt.src))
+			if err != nil {
+				t.Fatalf("CompileText: %v", err)
+			}
+
+			var doc struct {
+				Program []map[string]any `json:"program"`
+			}
+			if err := json.Unmarshal(out, &doc); err != nil {
+				t.Fatalf("json.Unmarshal: %v\n%s", err, out)
+			}
+			if len(doc.Program) != 1 {
+				t.Fatalf("program length = %d, want 1\n%s", len(doc.Program), out)
+			}
+			let, ok := doc.Program[0]["let"].(map[string]any)
+			if !ok {
+				t.Fatalf("missing let node:\n%s", out)
+			}
+			expr, ok := let["ok"].(map[string]any)
+			if !ok {
+				t.Fatalf("missing ok binding:\n%s", out)
+			}
+			args, ok := expr["<"].([]any)
+			if !ok || len(args) != 2 {
+				t.Fatalf("missing less-than comparison:\n%s", out)
+			}
+			zero, ok := args[0].(map[string]any)["zero"].(string)
+			if !ok || zero != tt.typ {
+				t.Fatalf("zero type = %v, want %s\n%s", args[0], tt.typ, out)
+			}
+			lit, ok := args[1].(map[string]any)["literal"].(map[string]any)
+			if !ok || lit["type"] != "int64" || lit["value"] != "1" {
+				t.Fatalf("literal = %v, want int64 literal 1\n%s", args[1], out)
+			}
+		})
+	}
+}
+
+func TestCompileText_RoundTripsMultilineCallArguments(t *testing.T) {
+	src := []byte(strings.Join([]string{
+		"let results, err = workflow.Go(ctx,",
+		"  fn(ctx: workflow.Context) -> map<string,any> {",
+		"    let in = map<string,any> {",
+		"      \"wallet_address\": \"0xHOT1\"",
+		"      \"token\": \"ETH\"",
+		"    }",
+		"    let out = zero map<string,any>",
+		"    return out",
+		"  },",
+		"  fn(ctx: workflow.Context) -> map<string,any> {",
+		"    let in = map<string,any> {",
+		"      \"wallet_address\": \"0xHOT2\"",
+		"      \"token\": \"USDT\"",
+		"    }",
+		"    let out = zero map<string,any>",
+		"    return out",
+		"  })",
+		"return null",
 	}, "\n"))
 
 	out, err := wflang.CompileText(src)

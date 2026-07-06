@@ -417,7 +417,7 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 		return expr
 	}
 	if isBuiltinCallOp(c.Op) && len(c.Args) > 0 {
-		return canonicalDisplayOp(c.Op) + "(" + f.exprList(c.Args) + ")"
+		return f.callWithArgs(canonicalDisplayOp(c.Op), c.Args)
 	}
 	if len(c.Args) > 0 {
 		if pkg, ok := c.Args[0].(*ast.Pkg); ok {
@@ -425,11 +425,11 @@ func (f *pseudoFormatter) callExpr(c *ast.Call) string {
 			if f.explicitPkgCall(pkg.Name) {
 				head = "pkg " + head
 			}
-			return head + "(" + f.exprList(c.Args[1:]) + ")"
+			return f.callWithArgs(head, c.Args[1:])
 		}
-		return f.expr(c.Args[0]) + "." + c.Op + "(" + f.exprList(c.Args[1:]) + ")"
+		return f.callWithArgs(f.expr(c.Args[0])+"."+c.Op, c.Args[1:])
 	}
-	return c.Op + "(" + f.exprList(c.Args) + ")"
+	return f.callWithArgs(c.Op, c.Args)
 }
 
 func (f *pseudoFormatter) infixExpr(c *ast.Call) string {
@@ -540,6 +540,45 @@ func (f *pseudoFormatter) exprList(nodes []ast.Node) string {
 		out[i] = f.expr(n)
 	}
 	return strings.Join(out, ", ")
+}
+
+func (f *pseudoFormatter) callWithArgs(head string, nodes []ast.Node) string {
+	parts := make([]string, len(nodes))
+	firstMultiline := -1
+	for i, n := range nodes {
+		parts[i] = f.expr(n)
+		if firstMultiline == -1 && strings.Contains(parts[i], "\n") {
+			firstMultiline = i
+		}
+	}
+	if firstMultiline == -1 || len(parts) < 2 {
+		return head + "(" + strings.Join(parts, ", ") + ")"
+	}
+	var b strings.Builder
+	b.WriteString(head)
+	b.WriteByte('(')
+	if firstMultiline > 0 {
+		b.WriteString(strings.Join(parts[:firstMultiline], ", "))
+		b.WriteByte(',')
+	}
+	for i := firstMultiline; i < len(parts); i++ {
+		b.WriteByte('\n')
+		b.WriteString(indentPseudoText(parts[i], 1))
+		if i < len(parts)-1 {
+			b.WriteByte(',')
+		}
+	}
+	b.WriteByte(')')
+	return b.String()
+}
+
+func indentPseudoText(s string, indent int) string {
+	prefix := strings.Repeat("  ", indent)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (f *pseudoFormatter) mapExpr(x *ast.MapLit) string {

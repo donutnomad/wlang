@@ -163,6 +163,13 @@ func NewExecutor(ctx context.Context, scope *Scope, reg HostRegistry,
 // Scope returns the current scope.
 func (e *Executor) Scope() *Scope { return e.scope }
 
+// SetScope replaces the current scope. Host coroutine schedulers use the
+// Scope/SetScope pair to save/restore the shared executor scope across
+// suspension points: a parked closure freezes its stack mid-InvokeClosure,
+// so the deferred scope restoration does not run until resume, and any
+// interleaved coroutine would otherwise observe the parked closure's scope.
+func (e *Executor) SetScope(s *Scope) { e.scope = s }
+
 // Ctx returns the executor's context.
 func (e *Executor) Ctx() context.Context { return e.ctx }
 
