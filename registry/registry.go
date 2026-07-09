@@ -1535,6 +1535,12 @@ func safeCall(impl reflect.Value, in []reflect.Value, name, path string) (out []
 	defer func() {
 		if r := recover(); r != nil {
 			le := werr.Newf(werr.CodePanic, "%q panicked: %v", name, r).WithPath(path)
+			// Preserve the error chain when the panic value is an error, so host-side
+			// typed errors survive the E_PANIC wrapping and remain matchable via
+			// errors.As/errors.Is through LangError.Unwrap.
+			if err, ok := r.(error); ok {
+				le.Cause = err
+			}
 			panicErr = le
 		}
 	}()
