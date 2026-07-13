@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/donutnomad/wlang/ast"
 	"github.com/donutnomad/wlang/runtime"
 	"github.com/donutnomad/wlang/wflang"
 )
@@ -24,10 +23,10 @@ func TestRunOptionsOnStepObservesPathAndScope(t *testing.T) {
 	var sawPath string
 	var sawX any
 	_, err = prog.Run(context.Background(), wflang.RunOptions{
-		OnStep: func(node ast.Node, scope *runtime.Scope) error {
-			if node.Path() == "/program/1/return" {
-				sawPath = node.Path()
-				sawX = scope.AllVars()["x"].Go()
+		OnStep: func(info runtime.StepInfo) error {
+			if info.Node.Path() == "/program/1/return" {
+				sawPath = info.Node.Path()
+				sawX = info.Scope.AllVars()["x"].Go()
 				return errPause
 			}
 			return nil
@@ -51,10 +50,10 @@ func TestSessionOptionsOnStepObservesAppendRun(t *testing.T) {
 	var sawPath string
 	var sawX any
 	sess, err := eng.NewSession(wflang.SessionOptions{
-		OnStep: func(node ast.Node, scope *runtime.Scope) error {
-			if node.Path() == "/program/1/return" {
-				sawPath = node.Path()
-				sawX = scope.AllVars()["x"].Go()
+		OnStep: func(info runtime.StepInfo) error {
+			if info.Node.Path() == "/program/1/return" {
+				sawPath = info.Node.Path()
+				sawX = info.Scope.AllVars()["x"].Go()
 				return errPause
 			}
 			return nil
@@ -89,10 +88,10 @@ func TestTraceProgramRunOptionsOnStepObservesPathAndScope(t *testing.T) {
 		{"let":{"x":{"literal":{"type":"int64","value":"1"}}}},
 		{"return":{"var":"x"}}
 	]`), wflang.RunOptions{
-		OnStep: func(node ast.Node, scope *runtime.Scope) error {
-			if node.Path() == "/program/1/return" {
-				sawPath = node.Path()
-				sawX = scope.AllVars()["x"].Go()
+		OnStep: func(info runtime.StepInfo) error {
+			if info.Node.Path() == "/program/1/return" {
+				sawPath = info.Node.Path()
+				sawX = info.Scope.AllVars()["x"].Go()
 				return errPause
 			}
 			return nil

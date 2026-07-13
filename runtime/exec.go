@@ -16,6 +16,12 @@ import (
 // struct stays compact.
 type atomicInt32 = atomic.Int32
 
+// routineInstanceSeq hands every launched routine instance a unique increasing
+// ID (from 1; 0 is reserved for the main line). It is process-global so IDs stay
+// unique across concurrently running programs, at the cost of not restarting at
+// 1 per program: treat the value as an opaque identity, not an index.
+var routineInstanceSeq atomic.Uint64
+
 const RoutineHandleType = "routineHandle"
 
 // HostRegistry is the interface the executor needs from the host registry.
@@ -90,22 +96,40 @@ type Budget struct {
 // RoutineErrorHandler observes errors raised inside a fire-and-forget routine.
 type RoutineErrorHandler func(ctx context.Context, err error)
 
+// StepInfo describes the statement a StepHook is about to observe.
+type StepInfo struct {
+	// Node is the statement about to execute.
+	Node ast.Node
+	// Scope is the scope the statement executes in.
+	Scope *Scope
+	// RoutineID identifies the routine instance running this statement.
+	// 0 means the main line (not inside any routine). Each `routine {do: ...}`
+	// launch gets a distinct non-zero ID, so concurrent instances of the same
+	// body are distinguishable. IDs are opaque and unique within the process.
+	RoutineID uint64
+}
+
 // StepHook observes a statement before it executes. Returning an error stops
 // execution and returns that error to the caller.
-type StepHook func(node ast.Node, scope *Scope) error
+type StepHook func(info StepInfo) error
 
 // Executor runs statements within a scope chain.
 type Executor struct {
-	ctx          context.Context
-	scope        *Scope
-	registry     HostRegistry
-	pkgs         map[string]any
-	budget       Budget
-	stepCount    int64
-	loopCount    int64
-	callDepth    int
-	maxLoopCtx   int // current loop depth for break/continue validity
-	routineCount atomicInt32
+	ctx        context.Context
+	scope      *Scope
+	registry   HostRegistry
+	pkgs       map[string]any
+	budget     Budget
+	stepCount  int64
+	loopCount  int64
+	callDepth  int
+	maxLoopCtx int // current loop depth for break/continue validity
+	// routineCount is shared by pointer with every child Executor so
+	// Budget.MaxRoutines is enforced across nested routine launches.
+	routineCount *atomicInt32
+	// routineID is the instance ID of the routine this Executor runs
+	// (0 = main line). Routine instances map 1:1 onto child Executors.
+	routineID    uint64
 	onRoutineErr RoutineErrorHandler
 	OnStep       StepHook
 }
@@ -157,11 +181,17 @@ func NewExecutor(ctx context.Context, scope *Scope, reg HostRegistry,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &Executor{ctx: ctx, scope: scope, registry: reg, pkgs: pkgs, budget: budget}
+	return &Executor{
+		ctx: ctx, scope: scope, registry: reg, pkgs: pkgs, budget: budget,
+		routineCount: new(atomicInt32),
+	}
 }
 
 // Scope returns the current scope.
 func (e *Executor) Scope() *Scope { return e.scope }
+
+// RoutineID returns the routine instance ID this Executor runs (0 = main line).
+func (e *Executor) RoutineID() uint64 { return e.routineID }
 
 // SetScope replaces the current scope. Host coroutine schedulers use the
 // Scope/SetScope pair to save/restore the shared executor scope across
@@ -199,7 +229,7 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 		return types.Value{}, sigNone, err
 	}
 	if e.OnStep != nil {
-		if err := e.OnStep(n, e.scope); err != nil {
+		if err := e.OnStep(StepInfo{Node: n, Scope: e.scope, RoutineID: e.routineID}); err != nil {
 			return types.Value{}, sigNone, err
 		}
 	}
@@ -913,7 +943,8 @@ func (e *Executor) RunProgram(p *ast.Program) (types.Value, error) {
 //
 // The goroutine runs against an isolated child Executor so per-step counters
 // (stepCount, loopCount, callDepth) do not race with the parent goroutine.
-// The routineCount counter remains shared (it's atomic).
+// The routineCount counter is shared by pointer with the child so MaxRoutines
+// is enforced across nested routine launches too.
 func (e *Executor) execRoutine(x *ast.Routine) (types.Value, Signal, error) {
 	v, err := e.evalRoutine(x)
 	return v, sigNone, err
@@ -951,12 +982,15 @@ func (e *Executor) evalRoutine(x *ast.Routine) (types.Value, error) {
 			}
 			return types.Value{}, err
 		}
+		// invokePreparedHostCall goes straight to the registry: it never runs a
+		// statement, so this child needs neither a scope nor a routineID.
 		child := &Executor{
-			ctx:      ctx,
-			registry: e.registry,
-			pkgs:     e.pkgs,
-			budget:   e.budget,
-			OnStep:   e.OnStep,
+			ctx:          ctx,
+			registry:     e.registry,
+			pkgs:         e.pkgs,
+			budget:       e.budget,
+			routineCount: e.routineCount,
+			OnStep:       e.OnStep,
 		}
 		go func() {
 			defer func() {
@@ -982,13 +1016,18 @@ func (e *Executor) evalRoutine(x *ast.Routine) (types.Value, error) {
 	// the scope chain is not shared, mirroring Go's `go func() { ... }()`.
 	// The last expression's value (or an explicit return) becomes the handle
 	// result; top-level defers in the body fire before the handle resolves.
+	//
+	// The child carries a fresh routineID: every launch is a distinct instance,
+	// so an OnStep hook can tell concurrent instances of the same body apart.
 	body := x.Body
 	child := &Executor{
-		ctx:      ctx,
-		registry: e.registry,
-		pkgs:     e.pkgs,
-		budget:   e.budget,
-		OnStep:   e.OnStep,
+		ctx:          ctx,
+		registry:     e.registry,
+		pkgs:         e.pkgs,
+		budget:       e.budget,
+		routineCount: e.routineCount,
+		routineID:    routineInstanceSeq.Add(1),
+		OnStep:       e.OnStep,
 	}
 	child.scope = NewScope()
 	go func() {

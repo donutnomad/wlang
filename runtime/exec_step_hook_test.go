@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/donutnomad/wlang/ast"
 	"github.com/donutnomad/wlang/compiler"
 )
 
@@ -24,10 +23,14 @@ func TestExecutorOnStepObservesStatementScopeAndCanPause(t *testing.T) {
 	exec := NewExecutor(context.Background(), NewScope(), nil, nil, Budget{})
 	var paths []string
 	var xAtSet any
-	exec.OnStep = func(node ast.Node, scope *Scope) error {
-		paths = append(paths, node.Path())
-		if node.Path() == "/program/1/set" {
-			vars := scope.AllVars()
+	exec.OnStep = func(info StepInfo) error {
+		paths = append(paths, info.Node.Path())
+		if info.RoutineID != 0 {
+			t.Errorf("main-line statement %q got routineID %d, want 0",
+				info.Node.Path(), info.RoutineID)
+		}
+		if info.Node.Path() == "/program/1/set" {
+			vars := info.Scope.AllVars()
 			xAtSet = vars["x"].Go()
 			return errPause
 		}
