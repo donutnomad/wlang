@@ -34,6 +34,16 @@ func (e *Executor) Eval(n ast.Node) (types.Value, error) {
 		return e.evalZero(x)
 	case *ast.Array:
 		return e.evalArray(x)
+	case *ast.Tuple:
+		values := make([]types.Value, len(x.Items))
+		for i, item := range x.Items {
+			value, err := e.Eval(item)
+			if err != nil {
+				return types.Value{}, err
+			}
+			values[i] = value
+		}
+		return types.NewTuple(values...), nil
 	case *ast.FuncLit:
 		return e.evalFuncLit(x)
 	case *ast.FuncCall:

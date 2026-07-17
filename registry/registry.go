@@ -3,6 +3,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"sync"
@@ -50,23 +51,239 @@ type PackageSpec struct {
 
 // Registry owns host bindings.
 type Registry struct {
-	mu       sync.RWMutex
-	packages map[string]*boundPackage
-	types    map[string]*boundType
-	symbols  map[string]types.Value
+	mu                 sync.RWMutex
+	packages           map[string]*boundPackage
+	types              map[string]*boundType
+	symbols            map[string]types.Value
+	descriptors        map[string]types.TypeDescriptor
+	descriptorNameToID map[string]string
 }
 
 // New returns an empty Registry.
 func New() *Registry {
 	return &Registry{
-		packages: map[string]*boundPackage{},
-		types:    map[string]*boundType{},
-		symbols:  map[string]types.Value{},
+		packages:           map[string]*boundPackage{},
+		types:              map[string]*boundType{},
+		symbols:            map[string]types.Value{},
+		descriptors:        map[string]types.TypeDescriptor{},
+		descriptorNameToID: map[string]string{},
 	}
+}
+
+const (
+	maxDescriptorCount      = 1024
+	maxDescriptorDepth      = 64
+	maxDescriptorFields     = 4096
+	// Bounds the fully expanded zero carrier for records and fixed arrays.
+	maxDescriptorZeroValues = int64(1 << 20)
+)
+
+// BindDescriptors validates and installs a self-contained serializable type
+// graph. Rebinding an identical descriptor is idempotent; conflicting IDs or
+// language names fail before execution starts.
+func (r *Registry) BindDescriptors(descriptors map[string]types.TypeDescriptor) error {
+	if len(descriptors) > maxDescriptorCount {
+		return werr.Newf(werr.CodeBudget, "type descriptor count %d exceeds %d", len(descriptors), maxDescriptorCount)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	candidates := make(map[string]types.TypeDescriptor, len(descriptors))
+	stagedNames := make(map[string]string, len(r.descriptorNameToID)+len(descriptors))
+	for name, id := range r.descriptorNameToID {
+		stagedNames[name] = id
+	}
+	fieldCount := 0
+	for id, input := range descriptors {
+		descriptor := cloneDescriptor(input)
+		if descriptor.ID == "" {
+			descriptor.ID = id
+		}
+		if descriptor.ID != id {
+			return werr.Newf(werr.CodeASTShape, "type descriptor key %q does not match id %q", id, descriptor.ID)
+		}
+		if descriptor.LanguageName == "" {
+			return werr.Newf(werr.CodeASTShape, "type descriptor %q has empty language_name", id)
+		}
+		if descriptor.Kind == types.TypeKindArray && descriptor.Length < 0 {
+			return werr.Newf(werr.CodeASTShape, "array type descriptor %q has negative length %d", id, descriptor.Length)
+		}
+		if descriptor.Fingerprint != "" && descriptor.Fingerprint != types.DescriptorFingerprint(descriptor) {
+			return werr.Newf(werr.CodeASTShape, "type descriptor %q fingerprint mismatch", id)
+		}
+		fieldCount += len(descriptor.Fields)
+		if fieldCount > maxDescriptorFields {
+			return werr.Newf(werr.CodeBudget, "type descriptor fields exceed %d", maxDescriptorFields)
+		}
+		if prior, ok := r.descriptors[id]; ok && types.DescriptorFingerprint(prior) != types.DescriptorFingerprint(descriptor) {
+			return werr.Newf(werr.CodeASTShape, "type descriptor %q conflicts with existing definition", id)
+		}
+		if priorID, ok := stagedNames[descriptor.LanguageName]; ok && priorID != id {
+			return werr.Newf(werr.CodeASTShape, "language type %q maps to both %q and %q", descriptor.LanguageName, priorID, id)
+		}
+		descriptor.Fingerprint = types.DescriptorFingerprint(descriptor)
+		candidates[id] = descriptor
+		stagedNames[descriptor.LanguageName] = id
+	}
+	for id := range candidates {
+		if err := validateDescriptorGraph(id, candidates, nil, 0); err != nil {
+			return err
+		}
+		if _, err := descriptorZeroCost(id, candidates, map[string]int64{}); err != nil {
+			return err
+		}
+	}
+	for id, descriptor := range candidates {
+		r.descriptors[id] = descriptor
+		r.descriptorNameToID[descriptor.LanguageName] = id
+	}
+	return nil
+}
+
+func descriptorZeroCost(id string, descriptors map[string]types.TypeDescriptor, memo map[string]int64) (int64, error) {
+	if isBuiltinTypeID(id) {
+		return 1, nil
+	}
+	if cost, ok := memo[id]; ok {
+		return cost, nil
+	}
+	descriptor := descriptors[id]
+	cost := int64(1)
+	switch descriptor.Kind {
+	case types.TypeKindAlias:
+		underlyingCost, err := descriptorZeroCost(descriptor.Underlying, descriptors, memo)
+		if err != nil {
+			return 0, err
+		}
+		cost = underlyingCost
+	case types.TypeKindRecord:
+		for _, field := range descriptor.Fields {
+			fieldCost, err := descriptorZeroCost(field.TypeID, descriptors, memo)
+			if err != nil {
+				return 0, err
+			}
+			if fieldCost > maxDescriptorZeroValues-cost {
+				return 0, descriptorZeroBudgetError(id)
+			}
+			cost += fieldCost
+		}
+	case types.TypeKindArray:
+		elemCost, err := descriptorZeroCost(descriptor.Elem, descriptors, memo)
+		if err != nil {
+			return 0, err
+		}
+		if descriptor.Length > 0 && elemCost > (maxDescriptorZeroValues-1)/descriptor.Length {
+			return 0, descriptorZeroBudgetError(id)
+		}
+		cost += descriptor.Length * elemCost
+	case types.TypeKindPointer, types.TypeKindSlice, types.TypeKindMap:
+		// Their zero carriers are nil and do not expand their element graphs.
+	default:
+		return 0, werr.Newf(werr.CodeASTShape, "type descriptor %q has unsupported kind %q", id, descriptor.Kind)
+	}
+	if cost > maxDescriptorZeroValues {
+		return 0, descriptorZeroBudgetError(id)
+	}
+	memo[id] = cost
+	return cost, nil
+}
+
+func descriptorZeroBudgetError(id string) error {
+	return werr.Newf(werr.CodeBudget,
+		"type descriptor %q zero value exceeds %d expanded values", id, maxDescriptorZeroValues)
+}
+
+func validateDescriptorGraph(id string, descriptors map[string]types.TypeDescriptor, stack map[string]bool, depth int) error {
+	if isBuiltinTypeID(id) {
+		return nil
+	}
+	if depth > maxDescriptorDepth {
+		return werr.Newf(werr.CodeBudget, "type descriptor graph exceeds depth %d at %q", maxDescriptorDepth, id)
+	}
+	descriptor, ok := descriptors[id]
+	if !ok {
+		return werr.Newf(werr.CodeSymbol, "type descriptor %q is not defined", id)
+	}
+	if stack == nil {
+		stack = map[string]bool{}
+	}
+	if stack[id] {
+		return werr.Newf(werr.CodeType, "recursive type descriptor %q is not supported", id)
+	}
+	next := make(map[string]bool, len(stack)+1)
+	for key, value := range stack {
+		next[key] = value
+	}
+	next[id] = true
+	refs := descriptorReferences(descriptor)
+	for _, ref := range refs {
+		if err := validateDescriptorGraph(ref, descriptors, next, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func descriptorReferences(descriptor types.TypeDescriptor) []string {
+	switch descriptor.Kind {
+	case types.TypeKindAlias:
+		return []string{descriptor.Underlying}
+	case types.TypeKindPointer, types.TypeKindSlice, types.TypeKindArray:
+		return []string{descriptor.Elem}
+	case types.TypeKindMap:
+		return []string{descriptor.Key, descriptor.Elem}
+	case types.TypeKindRecord:
+		refs := make([]string, len(descriptor.Fields))
+		for i, field := range descriptor.Fields {
+			refs[i] = field.TypeID
+		}
+		return refs
+	default:
+		return nil
+	}
+}
+
+func isBuiltinTypeID(id string) bool {
+	switch id {
+	case types.TString, types.TBoolean,
+		types.TInt8, types.TInt16, types.TInt32, types.TInt64,
+		types.TUint8, types.TUint16, types.TUint32, types.TUint64,
+		types.TFloat32, types.TFloat64, types.TAny, types.TError, types.TNull:
+		return true
+	}
+	return false
+}
+
+// Descriptor resolves either a canonical descriptor ID or a language name.
+func (r *Registry) Descriptor(name string) (types.TypeDescriptor, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id := name
+	if mapped, ok := r.descriptorNameToID[name]; ok {
+		id = mapped
+	}
+	descriptor, ok := r.descriptors[id]
+	return cloneDescriptor(descriptor), ok
+}
+
+func cloneDescriptor(descriptor types.TypeDescriptor) types.TypeDescriptor {
+	descriptor.Fields = append([]types.FieldDescriptor(nil), descriptor.Fields...)
+	return descriptor
+}
+
+// DescriptorID resolves a language name to its canonical ID.
+func (r *Registry) DescriptorID(name string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.descriptors[name]; ok {
+		return name, true
+	}
+	id, ok := r.descriptorNameToID[name]
+	return id, ok
 }
 
 // boundFunc captures a host function via reflect.
 type boundFunc struct {
+	registry   *Registry
 	name       string
 	impl       reflect.Value
 	inTypes    []reflect.Type
@@ -291,7 +508,7 @@ func (r *Registry) BindSymbol(name string, value any) error {
 	if name == "" {
 		return werr.New(werr.CodeASTShape, "BindSymbol: empty name")
 	}
-	v, err := symbolValue(name, value)
+	v, err := symbolValue(r, name, value)
 	if err != nil {
 		return err
 	}
@@ -321,6 +538,9 @@ func (r *Registry) ZeroValue(typeName, path string) (types.Value, error) {
 	if v, ok := primitiveZero(typeName); ok {
 		return v, nil
 	}
+	if descriptor, ok := r.Descriptor(typeName); ok {
+		return r.zeroDescriptor(descriptor, path, map[string]bool{})
+	}
 	if strings.HasPrefix(typeName, "array<") && strings.HasSuffix(typeName, ">") {
 		return types.NewArray(typeName[6:len(typeName)-1], nil)
 	}
@@ -349,6 +569,68 @@ func (r *Registry) ZeroValue(typeName, path string) (types.Value, error) {
 			"type %q not registered", typeName).WithPath(path)
 	}
 	return types.NewValue(typeName, reflect.Zero(bt.rt).Interface()), nil
+}
+
+func (r *Registry) zeroDescriptor(descriptor types.TypeDescriptor, path string, stack map[string]bool) (types.Value, error) {
+	if stack[descriptor.ID] {
+		return types.Value{}, werr.Newf(werr.CodeType, "recursive type descriptor %q", descriptor.ID).WithPath(path)
+	}
+	next := make(map[string]bool, len(stack)+1)
+	for id, present := range stack {
+		next[id] = present
+	}
+	next[descriptor.ID] = true
+	switch descriptor.Kind {
+	case types.TypeKindAlias:
+		value, err := r.zeroByID(descriptor.Underlying, path, next)
+		if err != nil {
+			return types.Value{}, err
+		}
+		return types.NewValue(descriptor.LanguageName, value.Go()), nil
+	case types.TypeKindRecord:
+		fields := make(map[string]types.Value, len(descriptor.Fields))
+		aliases := make(map[string]string, len(descriptor.Fields))
+		for _, field := range descriptor.Fields {
+			value, err := r.zeroByID(field.TypeID, path+"/"+field.GoName, next)
+			if err != nil {
+				return types.Value{}, err
+			}
+			fields[field.GoName] = value
+			if field.JSONName != "" && field.JSONName != field.GoName {
+				aliases[field.JSONName] = field.GoName
+			}
+		}
+		return types.NewRecordWithAliases(descriptor.LanguageName, fields, aliases), nil
+	case types.TypeKindPointer:
+		return types.NewValue(descriptor.LanguageName, nil), nil
+	case types.TypeKindSlice:
+		return types.NewValue(descriptor.LanguageName, []any(nil)), nil
+	case types.TypeKindArray:
+		items := make([]any, descriptor.Length)
+		for i := range items {
+			value, err := r.zeroByID(descriptor.Elem, path, next)
+			if err != nil {
+				return types.Value{}, err
+			}
+			items[i] = value.Go()
+		}
+		return types.NewValue(descriptor.LanguageName, items), nil
+	case types.TypeKindMap:
+		return types.NewValue(descriptor.LanguageName, map[string]any(nil)), nil
+	default:
+		return types.Value{}, werr.Newf(werr.CodeType, "type descriptor %q has unsupported kind %q", descriptor.ID, descriptor.Kind).WithPath(path)
+	}
+}
+
+func (r *Registry) zeroByID(id, path string, stack map[string]bool) (types.Value, error) {
+	if value, ok := primitiveZero(id); ok {
+		return value, nil
+	}
+	descriptor, ok := r.Descriptor(id)
+	if !ok {
+		return types.Value{}, werr.Newf(werr.CodeSymbol, "type descriptor %q is not defined", id).WithPath(path)
+	}
+	return r.zeroDescriptor(descriptor, path, stack)
 }
 
 func splitMapTypeName(typeName string) (string, string, bool) {
@@ -419,6 +701,7 @@ func (r *Registry) CallValue(ctx context.Context, fn types.Value,
 	if err != nil {
 		return types.Value{}, err
 	}
+	bf.registry = r
 	return bf.call(ctx, nil, args, path)
 }
 
@@ -435,7 +718,7 @@ func (r *Registry) BindMethodValue(ctx context.Context, recv types.Value, name, 
 	bt, ok := r.lookupBoundTypeForReceiver(recv)
 	if !ok {
 		r.mu.RUnlock()
-		return reflectMethodValue(recv, name, path)
+		return reflectMethodValue(r, recv, name, path)
 	}
 	fn, found := bt.methods[name]
 	excluded := bt.excluded[name]
@@ -552,7 +835,7 @@ func bindReceiverValue(recv types.Value, target reflect.Type) (reflect.Value, *w
 		"receiver %s cannot bind method receiver %s", recv.TypeName(), target)
 }
 
-func reflectMethodValue(recv types.Value, name, path string) (types.Value, error) {
+func reflectMethodValue(r *Registry, recv types.Value, name, path string) (types.Value, error) {
 	if recv.IsNull() || recv.Go() == nil {
 		return types.Value{}, werr.Newf(werr.CodeNilReceiver,
 			"receiver is null for method value %q", name).WithPath(path)
@@ -576,10 +859,11 @@ func reflectMethodValue(recv types.Value, name, path string) (types.Value, error
 	if err != nil {
 		return types.Value{}, err
 	}
+	bf.registry = r
 	return types.NewValue(funcTypeName(bf), mv.Interface()), nil
 }
 
-func symbolValue(name string, value any) (types.Value, error) {
+func symbolValue(r *Registry, name string, value any) (types.Value, error) {
 	if v, ok := value.(types.Value); ok {
 		return v, nil
 	}
@@ -593,6 +877,7 @@ func symbolValue(name string, value any) (types.Value, error) {
 		if err != nil {
 			return types.Value{}, err
 		}
+		bf.registry = r
 		return types.NewValue(funcTypeName(bf), value), nil
 	}
 	return wrapResult(rv), nil
@@ -720,6 +1005,7 @@ func (r *Registry) BindGoPackage(name string, spec PackageSpec) error {
 		if err != nil {
 			return err
 		}
+		bf.registry = r
 		bf.deprecated = fs.Deprecated
 		pkg.funcs[fs.GoName] = bf
 	}
@@ -747,6 +1033,7 @@ func (r *Registry) BindGoPackageAuto(name string, target any) error {
 		if err != nil {
 			return err
 		}
+		bf.registry = r
 		pkg.funcs[m.Name] = bf
 	}
 	r.packages[name] = pkg
@@ -796,6 +1083,7 @@ func (r *Registry) AutoBindType(v any) error {
 		if err != nil {
 			return err
 		}
+		bf.registry = r
 		bt.methods[m.Name] = bf
 	}
 	return nil
@@ -897,6 +1185,7 @@ func (r *Registry) BindType(name string, rt reflect.Type, opts BindOptions) erro
 			}
 			continue
 		}
+		bf.registry = r
 		bf.capability = mergeCaps(opts.Capabilities, bf.capability)
 		if opts.Deprecated != "" && bf.deprecated == "" {
 			bf.deprecated = opts.Deprecated
@@ -1260,7 +1549,7 @@ func (bf *boundFunc) call(ctx context.Context, recv *types.Value,
 		} else {
 			target = bf.inTypes[i]
 		}
-		rv, outArg, err := coerceArg(a, target, outByName)
+		rv, outArg, err := coerceArg(a, target, outByName, bf.registry)
 		if err != nil {
 			return types.Value{}, werr.Newf(werr.CodeType,
 				"%q arg %d: %v", bf.name, i, err).WithPath(path)
@@ -1384,17 +1673,47 @@ func wrapResult(v reflect.Value) types.Value {
 }
 
 type preparedOutArg struct {
-	arg *types.OutArg
-	ptr reflect.Value
+	arg          *types.OutArg
+	ptr          reflect.Value
+	template     types.Value
+	registry     *Registry
+	mapSurrogate bool
 }
 
 func (p preparedOutArg) commit() error {
 	elem := p.ptr.Elem()
 	var next types.Value
-	if p.arg.TypeName != "" {
-		next = types.NewValue(p.arg.TypeName, elem.Interface())
-	} else {
-		next = wrapResult(elem)
+	if p.mapSurrogate {
+		raw, err := json.Marshal(elem.Interface())
+		if err != nil {
+			return werr.Newf(werr.CodeType, "out %q cannot encode map surrogate: %v", p.arg.Name, err)
+		}
+		decoded, err := p.registry.DecodeJSONValue(p.template.TypeName(), raw)
+		if err != nil {
+			return err
+		}
+		next = decoded
+	} else if p.registry != nil {
+		if _, ok := p.registry.Descriptor(p.template.TypeName()); ok {
+			decoded, err := p.registry.ImportGoValue(p.template.TypeName(), elem.Interface())
+			if err != nil {
+				return err
+			}
+			next = decoded
+		}
+	}
+	if next.TypeName() == "" {
+		if _, ok := types.AsRecord(p.template); ok {
+			merged, err := mergeReflectValue(p.template, elem)
+			if err != nil {
+				return err
+			}
+			next = merged
+		} else if p.arg.TypeName != "" {
+			next = types.NewValue(p.arg.TypeName, elem.Interface())
+		} else {
+			next = wrapResult(elem)
+		}
 	}
 	if p.arg.Commit == nil {
 		return werr.Newf(werr.CodeRuntime, "out %q has no commit hook", p.arg.Name)
@@ -1409,16 +1728,16 @@ func (p preparedOutArg) commit() error {
 }
 
 // coerceArg converts a typed Value into a reflect.Value of target type.
-func coerceArg(v types.Value, target reflect.Type, outByName map[string]*preparedOutArg) (reflect.Value, *preparedOutArg, error) {
+func coerceArg(v types.Value, target reflect.Type, outByName map[string]*preparedOutArg, registry *Registry) (reflect.Value, *preparedOutArg, error) {
 	if out, ok := v.Go().(*types.OutArg); ok && v.TypeName() == types.TOut {
-		rv, prepared, err := prepareOutArg(out, target, outByName)
+		rv, prepared, err := prepareOutArg(out, target, outByName, registry)
 		return rv, prepared, err
 	}
 	rv, err := coerce(v, target)
 	return rv, nil, err
 }
 
-func prepareOutArg(out *types.OutArg, target reflect.Type, outByName map[string]*preparedOutArg) (reflect.Value, *preparedOutArg, error) {
+func prepareOutArg(out *types.OutArg, target reflect.Type, outByName map[string]*preparedOutArg, registry *Registry) (reflect.Value, *preparedOutArg, error) {
 	if target.Kind() != reflect.Pointer && target.Kind() != reflect.Interface {
 		return reflect.Value{}, nil, werr.Newf(werr.CodeType,
 			"out %q requires pointer or interface target, got %s", out.Name, target)
@@ -1445,8 +1764,22 @@ func prepareOutArg(out *types.OutArg, target reflect.Type, outByName map[string]
 		elemType = curVal.Type()
 	}
 	ptr := reflect.New(elemType)
+	mapSurrogate := false
 	if curVal.IsValid() {
-		if curVal.Type().AssignableTo(elemType) {
+		_, hasDescriptor := registryDescriptor(registry, cur.TypeName())
+		_, isRecord := types.AsRecord(cur)
+		if isRecord && hasDescriptor && isStringAnyMap(elemType) {
+			ptr.Elem().Set(reflect.MakeMap(elemType))
+			mapSurrogate = true
+		} else if isRecord || hasDescriptor {
+			materialized, err := materializeValue(cur, elemType)
+			if err != nil {
+				return reflect.Value{}, nil, werr.Newf(werr.CodeType,
+					"out %q current value %s cannot initialize %s: %v",
+					out.Name, cur.TypeName(), elemType, err)
+			}
+			ptr.Elem().Set(materialized)
+		} else if curVal.Type().AssignableTo(elemType) {
 			ptr.Elem().Set(curVal)
 		} else if curVal.Type().ConvertibleTo(elemType) {
 			ptr.Elem().Set(curVal.Convert(elemType))
@@ -1461,17 +1794,28 @@ func prepareOutArg(out *types.OutArg, target reflect.Type, outByName map[string]
 			return reflect.Value{}, nil, werr.Newf(werr.CodeType,
 				"out %q pointer %s cannot satisfy %s", out.Name, ptr.Type(), target)
 		}
-		prepared := &preparedOutArg{arg: out, ptr: ptr}
+		prepared := &preparedOutArg{arg: out, ptr: ptr, template: cur, registry: registry, mapSurrogate: mapSurrogate}
 		if outByName != nil {
 			outByName[out.Name] = prepared
 		}
 		return ptr, prepared, nil
 	}
-	prepared := &preparedOutArg{arg: out, ptr: ptr}
+	prepared := &preparedOutArg{arg: out, ptr: ptr, template: cur, registry: registry, mapSurrogate: mapSurrogate}
 	if outByName != nil {
 		outByName[out.Name] = prepared
 	}
 	return ptr, prepared, nil
+}
+
+func isStringAnyMap(target reflect.Type) bool {
+	return target.Kind() == reflect.Map && target.Key().Kind() == reflect.String && target.Elem().Kind() == reflect.Interface && target.Elem().NumMethod() == 0
+}
+
+func registryDescriptor(registry *Registry, name string) (types.TypeDescriptor, bool) {
+	if registry == nil {
+		return types.TypeDescriptor{}, false
+	}
+	return registry.Descriptor(name)
 }
 
 func (p *preparedOutArg) valueForTarget(target reflect.Type) (reflect.Value, error) {
@@ -1500,6 +1844,9 @@ func coerce(v types.Value, target reflect.Type) (reflect.Value, error) {
 		return reflect.Value{}, werr.Newf(werr.CodeType,
 			"cannot pass null as %s", target)
 	}
+	if _, ok := types.AsRecord(v); ok {
+		return materializeValue(v, target)
+	}
 	gv := reflect.ValueOf(v.Go())
 	if gv.Type().AssignableTo(target) {
 		return gv, nil
@@ -1527,6 +1874,139 @@ func coerce(v types.Value, target reflect.Type) (reflect.Value, error) {
 	}
 	return reflect.Value{}, werr.Newf(werr.CodeType,
 		"cannot pass %s as %s", v.TypeName(), target)
+}
+
+func materializeValue(value types.Value, target reflect.Type) (reflect.Value, error) {
+	if record, ok := types.AsRecord(value); ok {
+		if target.Kind() == reflect.Pointer {
+			elem, err := materializeRecord(record, target.Elem())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			ptr := reflect.New(target.Elem())
+			ptr.Elem().Set(elem)
+			return ptr, nil
+		}
+		return materializeRecord(record, target)
+	}
+	return materializeCarrier(value.Go(), target)
+}
+
+func materializeRecord(record *types.Record, target reflect.Type) (reflect.Value, error) {
+	if target.Kind() != reflect.Struct {
+		return reflect.Value{}, werr.Newf(werr.CodeType,
+			"record %s requires struct target, got %s", record.TypeName(), target)
+	}
+	out := reflect.New(target).Elem()
+	for i := 0; i < target.NumField(); i++ {
+		fieldType := target.Field(i)
+		if !fieldType.IsExported() {
+			continue
+		}
+		fieldValue, ok := record.Field(fieldType.Name)
+		if !ok {
+			continue
+		}
+		materialized, err := materializeValue(fieldValue, fieldType.Type)
+		if err != nil {
+			return reflect.Value{}, werr.Newf(werr.CodeType,
+				"record %s field %s: %v", record.TypeName(), fieldType.Name, err)
+		}
+		out.Field(i).Set(materialized)
+	}
+	return out, nil
+}
+
+func materializeCarrier(carrier any, target reflect.Type) (reflect.Value, error) {
+	if carrier == nil {
+		switch target.Kind() {
+		case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map:
+			return reflect.Zero(target), nil
+		}
+		return reflect.Value{}, werr.Newf(werr.CodeType, "cannot materialize null as %s", target)
+	}
+	if record, ok := carrier.(*types.Record); ok {
+		return materializeValue(types.NewValue(record.TypeName(), record), target)
+	}
+	raw := reflect.ValueOf(carrier)
+	if raw.Type().AssignableTo(target) {
+		return raw, nil
+	}
+	if raw.Type().ConvertibleTo(target) {
+		return raw.Convert(target), nil
+	}
+	if target.Kind() == reflect.Slice && raw.Kind() == reflect.Slice {
+		out := reflect.MakeSlice(target, raw.Len(), raw.Len())
+		for i := 0; i < raw.Len(); i++ {
+			item, err := materializeCarrier(raw.Index(i).Interface(), target.Elem())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			out.Index(i).Set(item)
+		}
+		return out, nil
+	}
+	if target.Kind() == reflect.Array && raw.Kind() == reflect.Slice && raw.Len() == target.Len() {
+		out := reflect.New(target).Elem()
+		for i := 0; i < raw.Len(); i++ {
+			item, err := materializeCarrier(raw.Index(i).Interface(), target.Elem())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			out.Index(i).Set(item)
+		}
+		return out, nil
+	}
+	if target.Kind() == reflect.Map && raw.Kind() == reflect.Map {
+		out := reflect.MakeMapWithSize(target, raw.Len())
+		iter := raw.MapRange()
+		for iter.Next() {
+			key, err := materializeCarrier(iter.Key().Interface(), target.Key())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			item, err := materializeCarrier(iter.Value().Interface(), target.Elem())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			out.SetMapIndex(key, item)
+		}
+		return out, nil
+	}
+	return reflect.Value{}, werr.Newf(werr.CodeType, "cannot materialize %T as %s", carrier, target)
+}
+
+func mergeReflectValue(template types.Value, value reflect.Value) (types.Value, error) {
+	record, ok := types.AsRecord(template)
+	if !ok {
+		return types.NewValue(template.TypeName(), value.Interface()), nil
+	}
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return types.NewValue(template.TypeName(), nil), nil
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return types.Value{}, werr.Newf(werr.CodeType,
+			"record %s cannot commit from %s", record.TypeName(), value.Type())
+	}
+	for i := 0; i < value.NumField(); i++ {
+		fieldType := value.Type().Field(i)
+		if !fieldType.IsExported() {
+			continue
+		}
+		fieldTemplate, ok := record.Field(fieldType.Name)
+		if !ok {
+			continue
+		}
+		merged, err := mergeReflectValue(fieldTemplate, value.Field(i))
+		if err != nil {
+			return types.Value{}, err
+		}
+		record.SetField(fieldType.Name, merged)
+	}
+	return types.NewValue(template.TypeName(), record), nil
 }
 
 // safeCall invokes impl.Call(in) with a recover shield so that a host panic is

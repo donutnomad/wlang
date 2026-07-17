@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
+	"github.com/donutnomad/wlang/ast"
 	"github.com/donutnomad/wlang/compiler"
 	werr "github.com/donutnomad/wlang/errors"
 	"github.com/donutnomad/wlang/types"
@@ -39,6 +41,26 @@ func TestFunctionClosureCapturesOuterVariableByReference(t *testing.T) {
 	}
 	if v.TypeName() != types.TInt64 || v.Go().(int64) != 2 {
 		t.Fatalf("want int64=2, got %s=%v", v.TypeName(), v.Go())
+	}
+}
+
+func TestClosureSignatureReturnsDefensiveTypeCopies(t *testing.T) {
+	closure := &Closure{
+		params:  []ast.FuncParam{{Name: "ctx", Type: "workflow.Context"}, {Name: "input", Type: "flows.Input"}},
+		returns: []string{"flows.Result", "error"},
+	}
+	signature := closure.Signature()
+	if !reflect.DeepEqual(signature.Params, []string{"workflow.Context", "flows.Input"}) {
+		t.Fatalf("Params = %#v", signature.Params)
+	}
+	if !reflect.DeepEqual(signature.Returns, []string{"flows.Result", "error"}) {
+		t.Fatalf("Returns = %#v", signature.Returns)
+	}
+	signature.Params[0] = "mutated"
+	signature.Returns[0] = "mutated"
+	again := closure.Signature()
+	if again.Params[0] != "workflow.Context" || again.Returns[0] != "flows.Result" {
+		t.Fatalf("signature aliases closure storage: %#v", again)
 	}
 }
 
@@ -291,6 +313,22 @@ func TestFunctionReturnShapesAndErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("pointer return types null", func(t *testing.T) {
+		src := `[
+				{"let":{"f":{"fn":{"params":[],"returns":["*flows.DTO"],"do":[
+					{"return":{"literal":{"type":"null","value":null}}}
+				]}}}},
+				{"return":{"call":{"fn":{"var":"f"},"args":[]}}}
+			]`
+		v, err := runSrc(t, src)
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if v.TypeName() != "*flows.DTO" || v.Go() != nil {
+			t.Fatalf("want typed nil pointer, got %s=%v", v.TypeName(), v.Go())
+		}
+	})
+
 	t.Run("error return accepts null", func(t *testing.T) {
 		src := `[
 			{"let":{"f":{"fn":{"params":[],"returns":["error"],"do":[
@@ -302,8 +340,8 @@ func TestFunctionReturnShapesAndErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run: %v", err)
 		}
-		if v.TypeName() != types.TNull || v.Go() != nil {
-			t.Fatalf("want null, got %s=%v", v.TypeName(), v.Go())
+		if v.TypeName() != types.TError || v.Go() != nil {
+			t.Fatalf("want typed nil error, got %s=%v", v.TypeName(), v.Go())
 		}
 	})
 
@@ -361,6 +399,38 @@ func TestFunctionReturnShapesAndErrors(t *testing.T) {
 		_, err := runSrcWithScope(t, src, scope)
 		assertLangCode(t, err, werr.CodeType)
 	})
+}
+
+func TestDebugFramesFollowDynamicSiblingClosureCalls(t *testing.T) {
+	prog, err := compiler.ParseProgram([]byte(`[
+		{"let":{"f":{"fn":{"params":[],"returns":["string"],"do":[
+			{"return":{"literal":{"type":"string","value":"f"}}}
+		]}}}},
+		{"let":{"g":{"fn":{"params":[],"returns":["string"],"do":[
+			{"return":{"call":{"fn":{"var":"f"},"args":[]}}}
+		]}}}},
+		{"return":{"call":{"fn":{"var":"g"},"args":[]}}}
+	]`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	exec := NewExecutor(context.Background(), NewScope(), nil, nil, Budget{})
+	var frames []DebugFrame
+	exec.OnStep = func(info StepInfo) error {
+		if info.Node.Path() == "/program/0/let/f/fn/do/0/return" {
+			frames = info.Frames
+		}
+		return nil
+	}
+	if _, err := exec.RunProgram(prog); err != nil {
+		t.Fatalf("RunProgram: %v", err)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("frames = %#v, want f, g, main", frames)
+	}
+	if frames[0].Name != "closure" || frames[1].Name != "closure" || frames[2].Name != "main" {
+		t.Fatalf("frame names = %#v", frames)
+	}
 }
 
 func TestNilCarrierValuesCompareEqualToNull(t *testing.T) {

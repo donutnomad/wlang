@@ -110,6 +110,12 @@ type Array struct {
 	Items []Node
 }
 
+// Tuple is a first-class heterogeneous product value.
+type Tuple struct {
+	Base
+	Items []Node
+}
+
 // ---------- Statements ----------
 
 // Let defines a local variable.
@@ -333,6 +339,7 @@ type Match struct {
 type Program struct {
 	Lang    string
 	Imports []string
+	Types   map[string]types.TypeDescriptor
 	Body    []Node
 	// Diagnostics carries non-fatal compile-time messages such as deprecation
 	// notices emitted by Normalize (LANGUAGE.md §13.2 / TC-604, TC-882).

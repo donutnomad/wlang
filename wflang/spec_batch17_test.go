@@ -168,14 +168,12 @@ func TestTC646_ExactTypePriority(t *testing.T) {
 	}
 }
 
-// --- TC-673 ResultKind 三种：single / null / tuple ---------------------
+// --- TC-673 host result shapes: value+error / error ---------------------
 
 type tc673Shapes struct{}
 
 func (tc673Shapes) Single() (int64, error) { return 5, nil }
 func (tc673Shapes) Nothing() error         { return nil }
-
-// tuple return is not supported — we verify the two supported forms only.
 
 func TestTC673_ResultKindSingleAndNull(t *testing.T) {
 	reg := wflang.DefaultRegistry()

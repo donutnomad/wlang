@@ -39,16 +39,43 @@ const (
 
 // Scope is a single lexical scope frame (§2.3).
 type Scope struct {
-	parent   *Scope
-	vars     map[string]*varBinding
-	deferred []deferredCall
+	parent    *Scope
+	vars      map[string]*varBinding
+	deferred  []deferredCall
+	validator valueValidator
+	frameRoot bool
+	frameName string
+	callPath  string
+	caller    *Scope
+}
+
+type valueValidator interface {
+	Descriptor(name string) (types.TypeDescriptor, bool)
+	ValidateValue(typeName string, value types.Value, path string) error
 }
 
 // NewScope creates an empty root scope.
-func NewScope() *Scope { return &Scope{vars: map[string]*varBinding{}} }
+func NewScope() *Scope {
+	return &Scope{vars: map[string]*varBinding{}, frameRoot: true, frameName: "main"}
+}
 
 // Push returns a child scope.
-func (s *Scope) Push() *Scope { return &Scope{parent: s, vars: map[string]*varBinding{}} }
+func (s *Scope) Push() *Scope {
+	return &Scope{parent: s, vars: map[string]*varBinding{}, validator: s.validator}
+}
+
+func (s *Scope) pushFrame(name, callPath string, caller *Scope) *Scope {
+	return &Scope{
+		parent: s, vars: map[string]*varBinding{}, frameRoot: true,
+		frameName: name, callPath: callPath, caller: caller, validator: s.validator,
+	}
+}
+
+func (s *Scope) setValueValidator(validator valueValidator) {
+	for current := s; current != nil; current = current.parent {
+		current.validator = validator
+	}
+}
 
 // PushDeferred records a deferred host call on this scope frame.
 func (s *Scope) PushDeferred(op string, recv types.Value, args []types.Value, path string) {
@@ -112,6 +139,58 @@ func (s *Scope) AllVars() map[string]types.Value {
 	return out
 }
 
+// FrameVars returns variables declared in the current function invocation.
+// Captured bindings stay reachable for evaluation while debugger views remain
+// scoped to the active call frame.
+func (s *Scope) FrameVars() map[string]types.Value {
+	out := map[string]types.Value{}
+	var chain []*Scope
+	for cur := s; cur != nil; cur = cur.parent {
+		chain = append(chain, cur)
+		if cur.frameRoot {
+			break
+		}
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		for name, binding := range chain[i].vars {
+			out[name] = binding.val
+		}
+	}
+	return out
+}
+
+// DebugFrame describes one lexical function frame for step-level debuggers.
+type DebugFrame struct {
+	Name  string
+	Path  string
+	Scope *Scope
+}
+
+// DebugFrames returns frames from the active function outward. Each frame
+// keeps the scope needed for an independent variables snapshot.
+func (s *Scope) DebugFrames(currentPath string) []DebugFrame {
+	var frames []DebugFrame
+	frameScope := s
+	path := currentPath
+	for frameScope != nil {
+		root := frameScope
+		for root != nil && !root.frameRoot {
+			root = root.parent
+		}
+		if root == nil {
+			break
+		}
+		name := root.frameName
+		if name == "" {
+			name = "closure"
+		}
+		frames = append(frames, DebugFrame{Name: name, Path: path, Scope: frameScope})
+		path = root.callPath
+		frameScope = root.caller
+	}
+	return frames
+}
+
 // Set searches outward and updates the binding. Returns E_READONLY_VAR / E_SYMBOL.
 func (s *Scope) Set(name string, v types.Value) error {
 	for cur := s; cur != nil; cur = cur.parent {
@@ -146,6 +225,12 @@ func (s *Scope) setPath(path string, v types.Value) error {
 				return werr.Newf(werr.CodeReadonlyVar,
 					"cannot assign to read-only variable %q", segs[0])
 			}
+			if record, ok := types.AsRecord(b.val); ok {
+				if err := setRecordPath(s.validator, record, segs[1:], v, path); err != nil {
+					return err
+				}
+				return nil
+			}
 			next, err := setGoPath(b.val.Go(), segs[1:], v.Go())
 			if err != nil {
 				return err
@@ -155,6 +240,50 @@ func (s *Scope) setPath(path string, v types.Value) error {
 		}
 	}
 	return werr.Newf(werr.CodeSymbol, "variable %q not defined", segs[0])
+}
+
+func setRecordPath(validator valueValidator, record *types.Record, segs []string, value types.Value, path string) error {
+	if len(segs) == 0 {
+		return werr.New(werr.CodeSymbol, "record field path is empty")
+	}
+	var fieldDescriptor types.FieldDescriptor
+	if validator != nil {
+		descriptor, ok := validator.Descriptor(record.TypeName())
+		if !ok || descriptor.Kind != types.TypeKindRecord {
+			return werr.Newf(werr.CodeType, "record type %q has no record descriptor", record.TypeName())
+		}
+		var found bool
+		for _, field := range descriptor.Fields {
+			if field.GoName == segs[0] || field.JSONName == segs[0] {
+				fieldDescriptor = field
+				found = true
+				break
+			}
+		}
+		if !found {
+			return werr.Newf(werr.CodeSymbol, "record field %q not found", segs[0])
+		}
+	}
+	if len(segs) == 1 {
+		if validator != nil {
+			if err := validator.ValidateValue(fieldDescriptor.TypeID, value, path); err != nil {
+				return err
+			}
+		}
+		if !record.SetField(segs[0], value) {
+			return werr.Newf(werr.CodeSymbol, "record field %q not found", segs[0])
+		}
+		return nil
+	}
+	field, ok := record.Field(segs[0])
+	if !ok {
+		return werr.Newf(werr.CodeSymbol, "record field %q not found", segs[0])
+	}
+	nested, ok := types.AsRecord(field)
+	if !ok {
+		return werr.Newf(werr.CodeType, "record field %q does not contain a record", segs[0])
+	}
+	return setRecordPath(validator, nested, segs[1:], value, path)
 }
 
 func setGoPath(root any, segs []string, next any) (any, error) {
@@ -366,13 +495,19 @@ func (s *Scope) LookupPath(path string) (types.Value, bool) {
 	if len(segs) == 1 {
 		return v, true
 	}
-	cur := v.Go()
+	var cur any = v
 	for _, seg := range segs[1:] {
+		if typed, ok := cur.(types.Value); ok {
+			cur = typed.Go()
+		}
 		nxt, ok := accessSegment(cur, seg)
 		if !ok {
 			return types.Value{}, false
 		}
 		cur = nxt
+	}
+	if typed, ok := cur.(types.Value); ok {
+		return typed, true
 	}
 	return wrapGo(cur), true
 }
@@ -381,6 +516,9 @@ func (s *Scope) LookupPath(path string) (types.Value, bool) {
 func accessSegment(cur any, seg string) (any, bool) {
 	if cur == nil {
 		return nil, false
+	}
+	if record, ok := cur.(*types.Record); ok {
+		return record.Field(seg)
 	}
 	rv := reflect.ValueOf(cur)
 	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {

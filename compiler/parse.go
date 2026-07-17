@@ -53,6 +53,7 @@ var builtinKeywords = map[string]bool{
 	"routine":  true,
 	"await":    true,
 	"array":    true,
+	"tuple":    true,
 	"fn":       true,
 	"call":     true,
 	"defer":    true,
@@ -117,6 +118,16 @@ func parseProgram(v any) (*ast.Program, error) {
 					}
 				}
 			}
+			var descriptors map[string]types.TypeDescriptor
+			if rawTypes, exists := x["types"]; exists {
+				raw, err := json.Marshal(rawTypes)
+				if err != nil {
+					return nil, werr.Newf(werr.CodeASTShape, "envelope.types: %v", err)
+				}
+				if err := json.Unmarshal(raw, &descriptors); err != nil {
+					return nil, werr.Newf(werr.CodeASTShape, "envelope.types: %v", err)
+				}
+			}
 			progRaw, ok := x["program"].([]any)
 			if !ok {
 				return nil, werr.New(werr.CodeASTShape,
@@ -126,7 +137,7 @@ func parseProgram(v any) (*ast.Program, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &ast.Program{Lang: lang, Imports: imports, Body: stmts}, nil
+			return &ast.Program{Lang: lang, Imports: imports, Types: descriptors, Body: stmts}, nil
 		}
 		// Single statement wrapper
 		n, err := parseStatement(x, "/program/0")
@@ -240,6 +251,12 @@ func parseNodeWithKey(key string, body any, path string) (ast.Node, error) {
 		return parseAwait(body, nodePath)
 	case "array":
 		return parseArrayLit(body, nodePath)
+	case "tuple":
+		items, err := parseArgList(body, nodePath)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Tuple{Base: ast.Base{P: nodePath}, Items: items}, nil
 	case "fn":
 		return parseFuncLit(body, nodePath)
 	case "call":
@@ -1048,8 +1065,11 @@ func isMapKeyType(k string) bool {
 		types.TInt8, types.TInt16, types.TInt32, types.TInt64,
 		types.TUint8, types.TUint16, types.TUint32, types.TUint64:
 		return true
+	case types.TBoolean, types.TFloat32, types.TFloat64, types.TAny,
+		types.TError, types.TNull, types.TBigInt, types.TBigDecimal:
+		return false
 	}
-	return false
+	return k != ""
 }
 
 // parseStructLit parses {"struct": ["TypeName", {field:expr,...}]}.

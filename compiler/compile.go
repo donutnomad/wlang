@@ -313,6 +313,15 @@ func foldNode(n ast.Node) (ast.Node, error) {
 			x.Items[i] = f
 		}
 		return x, nil
+	case *ast.Tuple:
+		for i := range x.Items {
+			item, err := foldNode(x.Items[i])
+			if err != nil {
+				return nil, err
+			}
+			x.Items[i] = item
+		}
+		return x, nil
 	case *ast.Call:
 		for i, a := range x.Args {
 			f, err := foldNode(a)

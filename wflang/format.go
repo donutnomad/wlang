@@ -336,6 +336,8 @@ func (f *pseudoFormatter) expr(n ast.Node) string {
 			items[i] = f.expr(it)
 		}
 		return fmt.Sprintf("array<%s>[%s]", x.Elem, strings.Join(items, ", "))
+	case *ast.Tuple:
+		return "tuple(" + f.exprList(x.Items) + ")"
 	case *ast.FuncLit:
 		params := make([]string, len(x.Params))
 		for i, p := range x.Params {

@@ -32,7 +32,7 @@ func Rule(user demo.User, scores []int64) demo.Report {
 	if risk >= 10 {
 		status = "high"
 	}
-	return demo.Report{Risk: risk, Error: err, Status: status}
+return demo.Report{Risk: risk, Error: err, Status: status}
 }
 `)
 	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
@@ -59,6 +59,26 @@ func Rule(user demo.User, scores []int64) demo.Report {
 		if !strings.Contains(got, needle) {
 			t.Fatalf("missing %q in:\n%s", needle, got)
 		}
+	}
+}
+
+func TestTranslateFileLowersMultipleReturnExpressionsToTuple(t *testing.T) {
+	src := []byte(`package rules
+
+func Rule() (string, error) {
+	return "created", nil
+}
+`)
+	out, err := go2wlang.TranslateFile(src, go2wlang.Options{FuncName: "Rule"})
+	if err != nil {
+		t.Fatalf("TranslateFile: %v", err)
+	}
+	pseudo, err := wflang.FormatPseudoCode(out)
+	if err != nil {
+		t.Fatalf("FormatPseudoCode: %v", err)
+	}
+	if !strings.Contains(string(pseudo), `return tuple("created", null)`) {
+		t.Fatalf("missing tuple return in:\n%s", pseudo)
 	}
 }
 

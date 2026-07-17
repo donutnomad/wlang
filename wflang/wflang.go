@@ -139,6 +139,9 @@ func (e *Engine) CompileJSON(data []byte) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := e.opts.Registry.BindDescriptors(prog.Types); err != nil {
+		return nil, err
+	}
 	if err := checkFeatures(prog, e.opts.Features); err != nil {
 		return nil, err
 	}

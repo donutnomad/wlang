@@ -17,14 +17,44 @@ func (e *Executor) evalStructLit(x *ast.StructLit) (types.Value, error) {
 		return types.Value{}, werr.New(werr.CodeSymbol,
 			"no registry available for struct literal").WithPath(x.Path())
 	}
+	if e.budget.MaxObjectKeys > 0 && len(x.Fields) > e.budget.MaxObjectKeys {
+		return types.Value{}, werr.Newf(werr.CodeBudget,
+			"MaxObjectKeys exceeded (%d)", e.budget.MaxObjectKeys).WithPath(x.Path())
+	}
+	if descriptor, ok := e.registry.Descriptor(x.TypeName); ok {
+		if descriptor.Kind != types.TypeKindRecord {
+			return types.Value{}, werr.Newf(werr.CodeType,
+				"type %q is %s, expected record", x.TypeName, descriptor.Kind).WithPath(x.Path())
+		}
+		zero, err := e.registry.ZeroValue(x.TypeName, x.Path())
+		if err != nil {
+			return types.Value{}, err
+		}
+		record, _ := types.AsRecord(zero)
+		fields := make(map[string]types.FieldDescriptor, len(descriptor.Fields))
+		for _, field := range descriptor.Fields {
+			fields[field.GoName] = field
+		}
+		for _, field := range x.Fields {
+			if _, ok := fields[field.Name]; !ok {
+				return types.Value{}, werr.Newf(werr.CodeSymbol,
+					"record %q has no field %q", x.TypeName, field.Name).WithPath(x.Path())
+			}
+			value, err := e.Eval(field.Expr)
+			if err != nil {
+				return types.Value{}, err
+			}
+			if err := e.registry.ValidateValue(fields[field.Name].TypeID, value, x.Path()); err != nil {
+				return types.Value{}, err
+			}
+			record.SetField(field.Name, value)
+		}
+		return zero, nil
+	}
 	rt, ok := e.registry.StructType(x.TypeName)
 	if !ok {
 		return types.Value{}, werr.Newf(werr.CodeSymbol,
 			"struct type %q not registered", x.TypeName).WithPath(x.Path())
-	}
-	if e.budget.MaxObjectKeys > 0 && len(x.Fields) > e.budget.MaxObjectKeys {
-		return types.Value{}, werr.Newf(werr.CodeBudget,
-			"MaxObjectKeys exceeded (%d)", e.budget.MaxObjectKeys).WithPath(x.Path())
 	}
 	inst := reflect.New(rt).Elem()
 	for _, f := range x.Fields {
@@ -69,6 +99,9 @@ func (e *Executor) evalMapLit(x *ast.MapLit) (types.Value, error) {
 		return types.Value{}, werr.Newf(werr.CodeBudget,
 			"MaxObjectKeys exceeded (%d)", e.budget.MaxObjectKeys).WithPath(x.Path())
 	}
+	if e.usesDescriptorMap(x) {
+		return e.evalDescriptorMapLit(x)
+	}
 	kt, err := goTypeForName(x.KeyType)
 	if err != nil {
 		return types.Value{}, werr.Newf(werr.CodeType,
@@ -109,6 +142,45 @@ func (e *Executor) evalMapLit(x *ast.MapLit) (types.Value, error) {
 		m.SetMapIndex(rk, rv)
 	}
 	return types.NewValue(types.MapType(x.KeyType, x.ValType), m.Interface()), nil
+}
+
+func (e *Executor) usesDescriptorMap(x *ast.MapLit) bool {
+	if e.registry == nil {
+		return false
+	}
+	if descriptor, ok := e.registry.Descriptor(types.MapType(x.KeyType, x.ValType)); ok {
+		return descriptor.Kind == types.TypeKindMap
+	}
+	_, keyDescriptor := e.registry.Descriptor(x.KeyType)
+	_, valueDescriptor := e.registry.Descriptor(x.ValType)
+	return keyDescriptor || valueDescriptor
+}
+
+func (e *Executor) evalDescriptorMapLit(x *ast.MapLit) (types.Value, error) {
+	result := make(map[string]any, len(x.Entries))
+	for _, entry := range x.Entries {
+		key, err := e.Eval(entry.Key)
+		if err != nil {
+			return types.Value{}, err
+		}
+		if err := e.registry.ValidateValue(x.KeyType, key, x.Path()); err != nil {
+			return types.Value{}, err
+		}
+		keyString, ok := key.Go().(string)
+		if !ok {
+			return types.Value{}, werr.Newf(werr.CodeType,
+				"descriptor map key expects string-backed %s, got %T", x.KeyType, key.Go()).WithPath(x.Path())
+		}
+		value, err := e.Eval(entry.Val)
+		if err != nil {
+			return types.Value{}, err
+		}
+		if err := e.registry.ValidateValue(x.ValType, value, x.Path()); err != nil {
+			return types.Value{}, err
+		}
+		result[keyString] = value.Go()
+	}
+	return types.NewValue(types.MapType(x.KeyType, x.ValType), result), nil
 }
 
 // evalChanLit constructs a chan<T> value (LANGUAGE.md §3.10).

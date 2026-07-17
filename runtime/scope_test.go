@@ -147,6 +147,42 @@ func TestScopeAllVarsIncludesParentsAndChildOverrides(t *testing.T) {
 	}
 }
 
+func TestScopeFrameVarsStopsAtActiveCallFrame(t *testing.T) {
+	// Edge Case: debugger frame snapshots include nested block locals while
+	// captured bindings from the enclosing closure remain outside the view.
+	root := NewScope()
+	root.Let("captured", types.NewValue(types.TString, "outer"), "")
+	frame := root.pushFrame("closure", "/program/1/expr", root)
+	frame.Let("param", types.NewValue(types.TString, "argument"), "")
+	block := frame.Push()
+	block.Let("local", types.NewValue(types.TInt64, int64(7)), "")
+
+	got := block.FrameVars()
+	if len(got) != 2 {
+		t.Fatalf("want 2 frame vars, got %d: %#v", len(got), got)
+	}
+	if got["param"].Go() != "argument" {
+		t.Fatalf("param mismatch: %v", got["param"].Go())
+	}
+	if got["local"].Go() != int64(7) {
+		t.Fatalf("local mismatch: %v", got["local"].Go())
+	}
+	if _, ok := got["captured"]; ok {
+		t.Fatalf("captured binding leaked into active frame: %#v", got)
+	}
+
+	frames := block.DebugFrames("/program/2/let")
+	if len(frames) != 2 {
+		t.Fatalf("want closure and main frames, got %#v", frames)
+	}
+	if frames[0].Name != "closure" || frames[0].Path != "/program/2/let" {
+		t.Fatalf("active frame mismatch: %#v", frames[0])
+	}
+	if frames[1].Name != "main" || frames[1].Path != "/program/1/expr" {
+		t.Fatalf("caller frame mismatch: %#v", frames[1])
+	}
+}
+
 // TC-050 PushScope / PopScope 嵌套：内层 let 不影响外层
 func TestTC050_ScopePopDiscardsInner(t *testing.T) {
 	// Outer block declares x, inner if.then also declares x locally (shadow)

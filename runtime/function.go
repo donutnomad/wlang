@@ -17,6 +17,30 @@ type Closure struct {
 	body    []ast.Node
 	scope   *Scope
 	typ     string
+	path    string
+}
+
+// FunctionSignature is the immutable public view of a closure's declared
+// parameter and return types.
+type FunctionSignature struct {
+	Params  []string
+	Returns []string
+}
+
+// Signature returns defensive copies so host ABI validation cannot mutate an
+// executable closure.
+func (c *Closure) Signature() FunctionSignature {
+	if c == nil {
+		return FunctionSignature{}
+	}
+	params := make([]string, len(c.params))
+	for i, param := range c.params {
+		params[i] = param.Type
+	}
+	return FunctionSignature{
+		Params:  params,
+		Returns: append([]string(nil), c.returns...),
+	}
 }
 
 type preparedFuncCall struct {
@@ -37,6 +61,7 @@ func (e *Executor) evalFuncLit(x *ast.FuncLit) (types.Value, error) {
 		body:    x.Body,
 		scope:   e.scope,
 		typ:     typ,
+		path:    x.Path(),
 	}), nil
 }
 
@@ -89,7 +114,7 @@ func (e *Executor) InvokeClosure(cl *Closure, args []types.Value) (types.Value, 
 	return e.invokePreparedFuncCall(preparedFuncCall{
 		fn:   types.NewValue(cl.typ, cl),
 		args: args,
-		path: "<host-invoke-closure>",
+		path: cl.path,
 	})
 }
 
@@ -109,13 +134,13 @@ func (e *Executor) invokePreparedFuncCall(call preparedFuncCall) (types.Value, e
 	}
 
 	prev := e.scope
-	callScope := cl.scope.Push()
+	callScope := cl.scope.pushFrame("closure", call.path, prev)
 	e.scope = callScope
 	defer func() { e.scope = prev }()
 
 	for i, p := range cl.params {
 		arg := call.args[i]
-		if !valueAssignableTo(arg, p.Type) {
+		if !e.valueAssignableTo(arg, p.Type) {
 			return types.Value{}, werr.Newf(werr.CodeType,
 				"function arg %q expects %s, got %s", p.Name, p.Type, arg.TypeName()).
 				WithPath(call.path)
@@ -162,30 +187,47 @@ func (e *Executor) checkFunctionReturn(cl *Closure, v types.Value, path string) 
 		return null, nil
 	}
 	if len(cl.returns) == 1 {
-		if !valueAssignableTo(v, cl.returns[0]) {
+		if !e.valueAssignableTo(v, cl.returns[0]) {
 			return types.Value{}, werr.Newf(werr.CodeType,
 				"function return expects %s, got %s", cl.returns[0], v.TypeName()).
 				WithPath(path)
 		}
-		return v, nil
+		return types.NewValue(cl.returns[0], v.Go()), nil
 	}
-	_, names, ok := extractTupleParts(v)
-	if !ok || len(names) != len(cl.returns) {
+	values, ok := types.UnpackTuple(v)
+	if !ok || len(values) != len(cl.returns) {
 		return types.Value{}, werr.Newf(werr.CodeType,
 			"function return expects tuple arity %d, got %s", len(cl.returns), v.TypeName()).
 			WithPath(path)
 	}
 	for i, want := range cl.returns {
-		if names[i] != want {
+		if !e.valueAssignableTo(values[i], want) {
 			return types.Value{}, werr.Newf(werr.CodeType,
-				"function return %d expects %s, got %s", i, want, names[i]).
+				"function return %d expects %s, got %s", i, want, values[i].TypeName()).
 				WithPath(path)
 		}
+		values[i] = types.NewValue(want, values[i].Go())
 	}
-	return v, nil
+	return types.NewTuple(values...), nil
 }
 
-func valueAssignableTo(v types.Value, want string) bool {
-	return want == "" || want == types.TAny || v.TypeName() == want ||
-		(want == types.TError && v.TypeName() == types.TNull)
+func (e *Executor) valueAssignableTo(v types.Value, want string) bool {
+	if want == "" || want == types.TAny || v.TypeName() == want {
+		return true
+	}
+	if v.TypeName() != types.TNull {
+		return false
+	}
+	if want == types.TError {
+		return true
+	}
+	if e.registry != nil {
+		if descriptor, ok := e.registry.Descriptor(want); ok {
+			switch descriptor.Kind {
+			case types.TypeKindPointer, types.TypeKindSlice, types.TypeKindMap:
+				return true
+			}
+		}
+	}
+	return strings.HasPrefix(want, "*") || strings.HasPrefix(want, "array<") || strings.HasPrefix(want, "map<")
 }

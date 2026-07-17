@@ -42,6 +42,9 @@ func DumpAST(p *Program) ([]byte, error) {
 		if len(p.prog.Imports) > 0 {
 			envelope["imports"] = anySlice(p.prog.Imports)
 		}
+		if len(p.prog.Types) > 0 {
+			envelope["types"] = p.prog.Types
+		}
 		return marshalCanonical(envelope)
 	}
 	return marshalCanonical(body)
@@ -110,6 +113,12 @@ func dumpNode(n ast.Node) (any, error) {
 			items = append(items, d)
 		}
 		return map[string]any{"array": map[string]any{"elem": x.Elem, "items": items}}, nil
+	case *ast.Tuple:
+		items, err := dumpNodeList(x.Items)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"tuple": items}, nil
 	case *ast.FuncLit:
 		params := make([]any, 0, len(x.Params))
 		for _, p := range x.Params {
@@ -524,6 +533,12 @@ func walkPath(n ast.Node, target string) (ast.Node, bool) {
 				return r, true
 			}
 		}
+	case *ast.Tuple:
+		for _, item := range x.Items {
+			if result, ok := walkPath(item, target); ok {
+				return result, true
+			}
+		}
 	case *ast.IfStmt:
 		if r, ok := walkPath(x.Cond, target); ok {
 			return r, true
@@ -680,6 +695,10 @@ func walkChildren(n ast.Node, fn func(ast.Node)) {
 	case *ast.Array:
 		for _, it := range x.Items {
 			fn(it)
+		}
+	case *ast.Tuple:
+		for _, item := range x.Items {
+			fn(item)
 		}
 	case *ast.IfStmt:
 		fn(x.Cond)
@@ -1447,6 +1466,14 @@ func (t *tracingRegistry) ResolveSymbol(name, path string) (types.Value, error) 
 
 func (t *tracingRegistry) ZeroValue(typeName, path string) (types.Value, error) {
 	return t.inner.ZeroValue(typeName, path)
+}
+
+func (t *tracingRegistry) Descriptor(name string) (types.TypeDescriptor, bool) {
+	return t.inner.Descriptor(name)
+}
+
+func (t *tracingRegistry) ValidateValue(typeName string, value types.Value, path string) error {
+	return t.inner.ValidateValue(typeName, value, path)
 }
 
 // StructType forwards to the wrapped registry so struct-literal evaluation

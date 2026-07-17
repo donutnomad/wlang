@@ -185,6 +185,13 @@ func (t *typeChecker) walk(n ast.Node) error {
 			}
 		}
 		return nil
+	case *ast.Tuple:
+		for _, item := range x.Items {
+			if err := t.walk(item); err != nil {
+				return err
+			}
+		}
+		return nil
 	case *ast.FuncLit:
 		return t.walkBlock(x.Body)
 	case *ast.FuncCall:

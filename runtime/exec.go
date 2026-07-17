@@ -34,6 +34,8 @@ type HostRegistry interface {
 	BindMethodValue(ctx context.Context, recv types.Value, name, path string) (types.Value, error)
 	ResolveSymbol(name, path string) (types.Value, error)
 	ZeroValue(typeName, path string) (types.Value, error)
+	Descriptor(name string) (types.TypeDescriptor, bool)
+	ValidateValue(typeName string, value types.Value, path string) error
 	// StructType returns the reflect.Type for a registered struct type used by
 	// struct-literal evaluation (LANGUAGE.md §3.9). Implementations that do not
 	// expose struct types may always return false.
@@ -107,6 +109,8 @@ type StepInfo struct {
 	// launch gets a distinct non-zero ID, so concurrent instances of the same
 	// body are distinguishable. IDs are opaque and unique within the process.
 	RoutineID uint64
+	// Frames lists the active function frame first, followed by its callers.
+	Frames []DebugFrame
 }
 
 // StepHook observes a statement before it executes. Returning an error stops
@@ -181,6 +185,7 @@ func NewExecutor(ctx context.Context, scope *Scope, reg HostRegistry,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	scope.setValueValidator(reg)
 	return &Executor{
 		ctx: ctx, scope: scope, registry: reg, pkgs: pkgs, budget: budget,
 		routineCount: new(atomicInt32),
@@ -229,7 +234,10 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 		return types.Value{}, sigNone, err
 	}
 	if e.OnStep != nil {
-		if err := e.OnStep(StepInfo{Node: n, Scope: e.scope, RoutineID: e.routineID}); err != nil {
+		if err := e.OnStep(StepInfo{
+			Node: n, Scope: e.scope, RoutineID: e.routineID,
+			Frames: e.scope.DebugFrames(n.Path()),
+		}); err != nil {
 			return types.Value{}, sigNone, err
 		}
 	}
@@ -243,22 +251,22 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 			if err != nil {
 				return types.Value{}, sigNone, err
 			}
-			elems, elemNames, ok := extractTupleParts(v)
+			tupleValues, ok := types.UnpackTuple(v)
 			if !ok {
 				return types.Value{}, sigNone, werr.Newf(werr.CodeType,
 					"let destructure requires tuple value, got %s", v.TypeName()).
 					WithPath(x.Path())
 			}
-			if len(elems) != len(x.Destructure.Names) {
+			if len(tupleValues) != len(x.Destructure.Names) {
 				return types.Value{}, sigNone, werr.Newf(werr.CodeType,
 					"let destructure arity mismatch: %d names vs tuple<%d>",
-					len(x.Destructure.Names), len(elems)).WithPath(x.Path())
+					len(x.Destructure.Names), len(tupleValues)).WithPath(x.Path())
 			}
 			for i, name := range x.Destructure.Names {
 				if name == "_" {
 					continue
 				}
-				elemV := types.NewValue(elemNames[i], elems[i])
+				elemV := tupleValues[i]
 				declType := ""
 				if i < len(x.Destructure.Types) {
 					declType = x.Destructure.Types[i]
@@ -662,44 +670,6 @@ func runStatements(e *Executor, stmts []ast.Node) (types.Value, Signal, error) {
 	return last, sigNone, nil
 }
 
-// extractTupleParts pulls the element values and element type names out of a
-// tuple<T1,...,Tn> Value. Returns ok=false for non-tuple inputs.
-func extractTupleParts(v types.Value) ([]any, []string, bool) {
-	name := v.TypeName()
-	const prefix = "tuple<"
-	if len(name) < len(prefix)+2 || name[:len(prefix)] != prefix || name[len(name)-1] != '>' {
-		return nil, nil, false
-	}
-	inner := name[len(prefix) : len(name)-1]
-	var names []string
-	if inner != "" {
-		// Type names cannot themselves contain commas outside of nested
-		// generics. We do a balance-aware split on top-level commas so that
-		// tuple<map<string,int64>,error> stays parseable.
-		depth := 0
-		start := 0
-		for i := 0; i < len(inner); i++ {
-			switch inner[i] {
-			case '<':
-				depth++
-			case '>':
-				depth--
-			case ',':
-				if depth == 0 {
-					names = append(names, inner[start:i])
-					start = i + 1
-				}
-			}
-		}
-		names = append(names, inner[start:])
-	}
-	parts, ok := v.Go().([]any)
-	if !ok {
-		return nil, nil, false
-	}
-	return parts, names, true
-}
-
 func extractArrayItems(v types.Value) ([]any, string, bool) {
 	name := v.TypeName()
 	if len(name) < 7 || name[:6] != "array<" || name[len(name)-1] != '>' {
@@ -1030,6 +1000,7 @@ func (e *Executor) evalRoutine(x *ast.Routine) (types.Value, error) {
 		OnStep:       e.OnStep,
 	}
 	child.scope = NewScope()
+	child.scope.setValueValidator(e.registry)
 	go func() {
 		defer func() {
 			if e.budget.MaxRoutines > 0 {

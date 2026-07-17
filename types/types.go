@@ -363,6 +363,74 @@ func TupleType(elems []string) string {
 	return sb.String()
 }
 
+// NewTuple constructs a first-class tuple while preserving every element's
+// language type. A tuple is represented by its element carriers plus the
+// corresponding tuple<T...> type name.
+func NewTuple(values ...Value) Value {
+	names := make([]string, len(values))
+	carriers := make([]any, len(values))
+	for i, value := range values {
+		names[i] = value.TypeName()
+		carriers[i] = value.Go()
+	}
+	return NewValue(TupleType(names), carriers)
+}
+
+// UnpackTuple returns the typed elements of a tuple value.
+func UnpackTuple(value Value) ([]Value, bool) {
+	names, ok := splitTupleType(value.TypeName())
+	if !ok {
+		return nil, false
+	}
+	carriers, ok := value.Go().([]any)
+	if !ok || len(carriers) != len(names) {
+		return nil, false
+	}
+	out := make([]Value, len(names))
+	for i := range names {
+		out[i] = NewValue(names[i], carriers[i])
+	}
+	return out, true
+}
+
+func splitTupleType(name string) ([]string, bool) {
+	const prefix = "tuple<"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
+		return nil, false
+	}
+	inner := name[len(prefix) : len(name)-1]
+	if inner == "" {
+		return []string{}, true
+	}
+	depth := 0
+	start := 0
+	var out []string
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+			if depth < 0 {
+				return nil, false
+			}
+		case ',':
+			if depth == 0 {
+				if start == i {
+					return nil, false
+				}
+				out = append(out, inner[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if depth != 0 || start == len(inner) {
+		return nil, false
+	}
+	out = append(out, inner[start:])
+	return out, true
+}
+
 // AutoHostTypeNameOf derives a stable type name for a Go value.
 func AutoHostTypeNameOf(v any) string {
 	if v == nil {

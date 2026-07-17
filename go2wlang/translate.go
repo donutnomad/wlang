@@ -14,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/tools/go/packages"
+
+	wltypes "github.com/donutnomad/wlang/types"
 	"github.com/donutnomad/wlang/wflang"
 )
 
@@ -35,6 +38,7 @@ type Result struct {
 	Imports  map[string]string
 	FuncName string
 	Source   string
+	Types    map[string]wltypes.TypeDescriptor
 }
 
 // TranslateFilePath reads a Go source file and translates one named top-level
@@ -78,15 +82,15 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 	if opts.FuncName == "" {
 		return nil, fmt.Errorf("FuncName is required")
 	}
-	fset := token.NewFileSet()
 	filename := opts.Filename
 	if filename == "" {
 		filename = "input.go"
 	}
-	file, err := parser.ParseFile(fset, filename, src, 0)
+	unit, err := loadTranslationUnit(src, opts, filename)
 	if err != nil {
 		return nil, err
 	}
+	fset, file := unit.fset, unit.file
 	fn := findFunc(file, opts.FuncName)
 	if fn == nil {
 		return nil, fmt.Errorf("function %s not found", opts.FuncName)
@@ -97,10 +101,15 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 		imports:          importAliases(file, opts.Dir),
 		locals:           newLocalScopes(),
 		localPackageName: localPackageName(file, opts),
+		packagePath:      unit.packagePath,
 	}
-	t.info = typeInfoForFile(fset, file, opts.Dir)
+	t.info = unit.info
 	for k, v := range opts.PackageAliases {
 		t.imports[k] = v
+	}
+	descriptors, err := t.extractDescriptors(fn)
+	if err != nil {
+		return nil, err
 	}
 	if fn.Type.Params != nil {
 		for _, field := range fn.Type.Params.List {
@@ -137,6 +146,9 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 	if len(imports) > 0 {
 		env["imports"] = imports
 	}
+	if len(descriptors) > 0 {
+		env["types"] = descriptors
+	}
 	importMap := usedImportMap(imports, t.imports)
 	if opts.EmbedImportMap && len(importMap) > 0 {
 		env["importMap"] = importMap
@@ -154,6 +166,7 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 		Imports:  importMap,
 		FuncName: opts.FuncName,
 		Source:   filename,
+		Types:    descriptors,
 	}, nil
 }
 
@@ -165,7 +178,71 @@ type translator struct {
 	usedImports      map[string]bool
 	locals           *localScopes
 	localPackageName string
+	packagePath      string
 	namedReturn      string
+	descriptorNames  map[string]bool
+}
+
+type translationUnit struct {
+	fset        *token.FileSet
+	file        *ast.File
+	info        *gotypes.Info
+	packagePath string
+}
+
+func loadTranslationUnit(src []byte, opts Options, filename string) (translationUnit, error) {
+	if opts.Dir == "" {
+		return loadSingleFileUnit(src, filename, "")
+	}
+	absDir, err := filepath.Abs(opts.Dir)
+	if err != nil {
+		return translationUnit{}, err
+	}
+	absFilename := filename
+	if !filepath.IsAbs(absFilename) {
+		absFilename = filepath.Join(absDir, filename)
+	}
+	absFilename = filepath.Clean(absFilename)
+	fset := token.NewFileSet()
+	cfg := &packages.Config{
+		Dir:     absDir,
+		Fset:    fset,
+		Overlay: map[string][]byte{absFilename: src},
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+			packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports,
+	}
+	loaded, err := packages.Load(cfg, ".")
+	if err != nil {
+		return loadSingleFileUnit(src, filename, opts.Dir)
+	}
+	if len(loaded) != 1 {
+		return loadSingleFileUnit(src, filename, opts.Dir)
+	}
+	pkg := loaded[0]
+	if len(pkg.Errors) > 0 {
+		return loadSingleFileUnit(src, filename, opts.Dir)
+	}
+	for _, candidate := range pkg.Syntax {
+		pos := fset.Position(candidate.Pos())
+		candidateName, _ := filepath.Abs(pos.Filename)
+		if filepath.Clean(candidateName) == absFilename {
+			return translationUnit{fset: fset, file: candidate, info: pkg.TypesInfo, packagePath: pkg.PkgPath}, nil
+		}
+	}
+	return loadSingleFileUnit(src, filename, opts.Dir)
+}
+
+func loadSingleFileUnit(src []byte, filename, dir string) (translationUnit, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
+	if err != nil {
+		return translationUnit{}, err
+	}
+	return translationUnit{
+		fset: fset, file: file,
+		info:        typeInfoForFile(fset, file, dir),
+		packagePath: file.Name.Name,
+	}, nil
 }
 
 type localScopes struct {
@@ -328,12 +405,17 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 			}
 			return []any{map[string]any{"return": lit("null", nil)}}, nil
 		}
-		if len(x.Results) != 1 {
-			return nil, t.unsupported(s, "return supports zero or one value", "return a struct or tuple-producing host value")
+		values := make([]any, len(x.Results))
+		for i, result := range x.Results {
+			ex, err := t.expr(result)
+			if err != nil {
+				return nil, err
+			}
+			values[i] = ex
 		}
-		ex, err := t.expr(x.Results[0])
-		if err != nil {
-			return nil, err
+		ex := values[0]
+		if len(values) > 1 {
+			ex = map[string]any{"tuple": values}
 		}
 		if t.namedReturn != "" {
 			return []any{
@@ -1540,7 +1622,7 @@ func (t *translator) funcLit(x *ast.FuncLit) (any, error) {
 	params := []any{}
 	if x.Type.Params != nil {
 		for _, field := range x.Type.Params.List {
-			typ := typeName(field.Type)
+			typ := t.functionFieldTypeName(field.Type)
 			if typ == "" {
 				return nil, t.unsupported(field.Type, "function parameter type is not supported", "")
 			}
@@ -1555,7 +1637,7 @@ func (t *translator) funcLit(x *ast.FuncLit) (any, error) {
 	returns := []any{}
 	if x.Type.Results != nil {
 		for _, field := range x.Type.Results.List {
-			typ := typeName(field.Type)
+			typ := t.functionFieldTypeName(field.Type)
 			if typ == "" {
 				return nil, t.unsupported(field.Type, "function result type is not supported", "")
 			}
@@ -1588,6 +1670,17 @@ func (t *translator) funcLit(x *ast.FuncLit) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"fn": map[string]any{"params": params, "returns": returns, "do": body}}, nil
+}
+
+func (t *translator) functionFieldTypeName(expr ast.Expr) string {
+	if t.info != nil {
+		if typ := t.info.TypeOf(expr); typ != nil && t.usesDescriptorType(typ) {
+			if name := t.languageTypeName(typ); name != "" {
+				return name
+			}
+		}
+	}
+	return typeName(expr)
 }
 
 func (t *translator) makeExpr(x *ast.CallExpr) (any, error) {
@@ -1643,7 +1736,7 @@ func (t *translator) hostCall(x *ast.CallExpr) (any, error) {
 func (t *translator) compositeLit(x *ast.CompositeLit) (any, error) {
 	switch typ := x.Type.(type) {
 	case *ast.ArrayType:
-		elem := typeName(typ.Elt)
+		elem := t.typeName(typ.Elt)
 		if elem == "" {
 			return nil, t.unsupported(typ.Elt, "array element type is not supported", "")
 		}
@@ -1672,8 +1765,8 @@ func (t *translator) compositeLit(x *ast.CompositeLit) (any, error) {
 		}
 		return map[string]any{"array": map[string]any{"elem": elem, "items": items}}, nil
 	case *ast.MapType:
-		k := typeName(typ.Key)
-		v := typeName(typ.Value)
+		k := t.typeName(typ.Key)
+		v := t.typeName(typ.Value)
 		if k == "" || v == "" {
 			return nil, t.unsupported(x.Type, "map key/value type is not supported", "")
 		}
@@ -2020,6 +2113,13 @@ func typeName(e ast.Expr) string {
 }
 
 func (t *translator) typeName(e ast.Expr) string {
+	if t.info != nil {
+		if typ := t.info.TypeOf(e); typ != nil {
+			if name := t.languageTypeName(typ); name != "" && t.usesDescriptorType(typ) {
+				return name
+			}
+		}
+	}
 	switch x := e.(type) {
 	case *ast.Ident:
 		if isPredeclaredTypeName(x.Name) {
@@ -2058,6 +2158,73 @@ func (t *translator) typeName(e ast.Expr) string {
 		return "func<(" + strings.Join(params, ",") + ")->" + strings.Join(returns, ",") + ">"
 	}
 	return ""
+}
+
+func (t *translator) usesDescriptorType(typ gotypes.Type) bool {
+	if len(t.descriptorNames) == 0 || typ == nil {
+		return false
+	}
+	typ = gotypes.Unalias(typ)
+	switch current := typ.(type) {
+	case *gotypes.Named:
+		return t.descriptorNames[t.languageTypeName(current)]
+	case *gotypes.Pointer:
+		return t.usesDescriptorType(current.Elem())
+	case *gotypes.Slice:
+		return t.usesDescriptorType(current.Elem())
+	case *gotypes.Array:
+		return t.usesDescriptorType(current.Elem())
+	case *gotypes.Map:
+		return t.usesDescriptorType(current.Key()) || t.usesDescriptorType(current.Elem())
+	case *gotypes.Signature:
+		for i := 0; i < current.Params().Len(); i++ {
+			if t.usesDescriptorType(current.Params().At(i).Type()) {
+				return true
+			}
+		}
+		for i := 0; i < current.Results().Len(); i++ {
+			if t.usesDescriptorType(current.Results().At(i).Type()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (t *translator) funcTypeParts(x *ast.FuncType) ([]string, []string, bool) {
+	params := []string{}
+	if x.Params != nil {
+		for _, field := range x.Params.List {
+			typ := t.typeName(field.Type)
+			if typ == "" {
+				return nil, nil, false
+			}
+			count := 1
+			if len(field.Names) > 0 {
+				count = len(field.Names)
+			}
+			for i := 0; i < count; i++ {
+				params = append(params, typ)
+			}
+		}
+	}
+	returns := []string{}
+	if x.Results != nil {
+		for _, field := range x.Results.List {
+			typ := t.typeName(field.Type)
+			if typ == "" {
+				return nil, nil, false
+			}
+			count := 1
+			if len(field.Names) > 0 {
+				count = len(field.Names)
+			}
+			for i := 0; i < count; i++ {
+				returns = append(returns, typ)
+			}
+		}
+	}
+	return params, returns, true
 }
 
 func funcTypeParts(x *ast.FuncType) ([]string, []string, bool) {

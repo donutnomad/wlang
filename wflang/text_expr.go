@@ -203,6 +203,13 @@ func (p *textParser) parseIdentPrimary() (any, error) {
 	case "array":
 		p.take()
 		return p.parseArrayLit()
+	case "tuple":
+		p.take()
+		items, err := p.parseCallArgs()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"tuple": items}, nil
 	case "map":
 		p.take()
 		if !p.peekLit("<") {

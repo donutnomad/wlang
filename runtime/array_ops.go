@@ -35,7 +35,7 @@ func arrayPush(e *Executor, c *ast.Call) (types.Value, error) {
 	if err != nil {
 		return types.Value{}, err
 	}
-	if !valueAssignableTo(item, elem) {
+	if !e.valueAssignableTo(item, elem) {
 		return types.Value{}, werr.Newf(werr.CodeType,
 			"arr.push element expects %s, got %s", elem, item.TypeName()).WithPath(c.Args[1].Path())
 	}
@@ -127,7 +127,7 @@ func arraySet(e *Executor, c *ast.Call) (types.Value, error) {
 	if err != nil {
 		return types.Value{}, err
 	}
-	if !valueAssignableTo(item, elem) {
+	if !e.valueAssignableTo(item, elem) {
 		return types.Value{}, werr.Newf(werr.CodeType,
 			"arr.set element expects %s, got %s", elem, item.TypeName()).WithPath(c.Args[2].Path())
 	}
