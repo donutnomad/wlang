@@ -32,6 +32,28 @@ type Options struct {
 	LocalPackageName string
 }
 
+// EntrySignature describes the translated function's payload boundary: which
+// variable a host must bind the input to, and the descriptor IDs of the
+// business input and output types.
+//
+// InputVar is the Go parameter name. TranslateFileDetailed seeds every named
+// parameter into the local scope, so the translated body refers to the entry
+// parameter by that identifier; a host binding a typed value must use this
+// exact name rather than inventing one.
+//
+// Input and Output hold descriptor IDs as produced by addType, which are also
+// the keys of Result.Types. Pointer parameters therefore carry a "*"-prefixed ID.
+// Either field is empty when the corresponding type is absent or is not
+// descriptor backed, which keeps them consistent with what extractDescriptors
+// actually collected: error-only results, plain scalar parameters, and
+// parameters the body cannot reference (unnamed, or several sharing one type).
+type EntrySignature struct {
+	Function string
+	InputVar string
+	Input    string
+	Output   string
+}
+
 // Result contains generated wlang JSON and metadata useful for storage.
 type Result struct {
 	JSON     []byte
@@ -39,6 +61,7 @@ type Result struct {
 	FuncName string
 	Source   string
 	Types    map[string]wltypes.TypeDescriptor
+	Entry    EntrySignature
 }
 
 // TranslateFilePath reads a Go source file and translates one named top-level
@@ -107,7 +130,7 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 	for k, v := range opts.PackageAliases {
 		t.imports[k] = v
 	}
-	descriptors, err := t.extractDescriptors(fn)
+	descriptors, entry, err := t.extractDescriptors(fn)
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +190,7 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 		FuncName: opts.FuncName,
 		Source:   filename,
 		Types:    descriptors,
+		Entry:    entry,
 	}, nil
 }
 

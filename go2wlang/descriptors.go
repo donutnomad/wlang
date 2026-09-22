@@ -111,15 +111,21 @@ type descriptorExtractor struct {
 	visiting    map[string]bool
 }
 
-func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.TypeDescriptor, error) {
+func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.TypeDescriptor, EntrySignature, error) {
 	extractor := &descriptorExtractor{
 		translator: t, descriptors: map[string]wltypes.TypeDescriptor{}, visiting: map[string]bool{},
 	}
 	if err := extractor.collectFieldList(fn.Type.Params, true, false); err != nil {
-		return nil, err
+		return nil, EntrySignature{}, err
 	}
 	if err := extractor.collectFieldList(fn.Type.Results, false, false); err != nil {
-		return nil, err
+		return nil, EntrySignature{}, err
+	}
+	// Before fingerprinting: addType may still register descriptors, and every
+	// one of them has to be stamped by the loop below.
+	entry, err := extractor.extractEntrySignature(fn)
+	if err != nil {
+		return nil, EntrySignature{}, err
 	}
 	var firstErr error
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
@@ -145,7 +151,7 @@ func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.Ty
 		return true
 	})
 	if firstErr != nil {
-		return nil, firstErr
+		return nil, EntrySignature{}, firstErr
 	}
 	for id, descriptor := range extractor.descriptors {
 		descriptor.Fingerprint = wltypes.DescriptorFingerprint(descriptor)
@@ -155,7 +161,7 @@ func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.Ty
 	for _, descriptor := range extractor.descriptors {
 		t.descriptorNames[descriptor.LanguageName] = true
 	}
-	return extractor.descriptors, nil
+	return extractor.descriptors, entry, nil
 }
 
 func isSetUpdateHandlerCall(call *ast.CallExpr) bool {
@@ -194,6 +200,101 @@ func (e *descriptorExtractor) collectFieldList(fields *ast.FieldList, skipFirst,
 		}
 	}
 	return nil
+}
+
+// entryDescriptorSkipped reports whether collectFieldList would have skipped this
+// type at a non-payload boundary. Entry extraction must ask the same question,
+// otherwise Entry could name an ID that never made it into Result.Types.
+func entryDescriptorSkipped(typ gotypes.Type) bool {
+	return typ == nil || isErrorGoType(typ) || isContextLikeType(typ) || !containsNamedDTO(typ)
+}
+
+// extractEntrySignature reads the payload boundary of the translated function.
+//
+// It runs from inside extractDescriptors, after the field lists are collected
+// but before fingerprinting, so every ID it returns is a key of the descriptor
+// map. It deliberately reuses addType rather than canonicalNamedID, because a
+// pointer parameter's descriptor is keyed "*"+elem and canonicalNamedID cannot
+// express that at all.
+func (e *descriptorExtractor) extractEntrySignature(fn *ast.FuncDecl) (EntrySignature, error) {
+	entry := EntrySignature{Function: fn.Name.Name}
+
+	name, typ, ok := entryInputParam(e.translator, fn.Type.Params)
+	if ok && !entryDescriptorSkipped(typ) {
+		id, err := e.addType(typ, fn.Type.Params.Pos())
+		if err != nil {
+			return EntrySignature{}, err
+		}
+		// Both halves must survive together: an ID with no variable leaves the
+		// host nowhere to bind, a variable with no ID leaves it nothing to decode.
+		entry.InputVar = name
+		entry.Input = id
+	}
+
+	if typ, ok := entryOutputType(e.translator, fn.Type.Results); ok && !entryDescriptorSkipped(typ) {
+		id, err := e.addType(typ, fn.Type.Results.Pos())
+		if err != nil {
+			return EntrySignature{}, err
+		}
+		entry.Output = id
+	}
+	return entry, nil
+}
+
+// entryInputParam returns the business input parameter: the first one after the
+// leading context, and only when the body can actually reference it by name.
+//
+// An unnamed parameter, or several parameters sharing one type, yield no usable
+// identifier — the translator never seeds those into locals, so the body has no
+// way to mention them. Rather than guess, report no input and let the caller
+// fall back to the untyped path.
+func entryInputParam(t *translator, params *ast.FieldList) (string, gotypes.Type, bool) {
+	if params == nil {
+		return "", nil, false
+	}
+	index := 0
+	for _, field := range params.List {
+		count := len(field.Names)
+		if count == 0 {
+			count = 1
+		}
+		if count > 1 {
+			return "", nil, false
+		}
+		// Mirror collectFieldList(skipFirst: true): the leading ctx is not payload.
+		if index == 0 {
+			index += count
+			continue
+		}
+		if len(field.Names) == 0 {
+			return "", nil, false
+		}
+		return field.Names[0].Name, t.info.TypeOf(field.Type), true
+	}
+	return "", nil, false
+}
+
+// entryOutputType returns the first non-error result, i.e. the business value a
+// workflow hands back. A lone error result yields nothing, which is what makes
+// Output empty for error-only workflows.
+func entryOutputType(t *translator, results *ast.FieldList) (gotypes.Type, bool) {
+	if results == nil {
+		return nil, false
+	}
+	for _, field := range results.List {
+		count := len(field.Names)
+		if count == 0 {
+			count = 1
+		}
+		for range count {
+			typ := t.info.TypeOf(field.Type)
+			if typ == nil || isErrorGoType(typ) {
+				continue
+			}
+			return typ, true
+		}
+	}
+	return nil, false
 }
 
 func containsNamedDTO(typ gotypes.Type) bool {
