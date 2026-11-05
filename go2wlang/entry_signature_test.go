@@ -11,12 +11,11 @@ import (
 // nothing so the host falls back to the untyped path.
 func TestEntrySignatureExtraction(t *testing.T) {
 	tests := []struct {
-		name     string
-		source   string
-		wantVar  string
-		wantIn   string
-		wantOut  string
-		wantFunc string
+		name    string
+		source  string
+		wantVar string
+		wantIn  string
+		wantOut string
 	}{
 		{
 			name: "typed input and output",
@@ -27,7 +26,7 @@ type Out struct { OK bool }
 func Workflow(ctx context.Context, in In) (Out, error) {
 	return Out{OK: true}, nil
 }`,
-			wantVar: "in", wantIn: "orders.In", wantOut: "orders.Out", wantFunc: "Workflow",
+			wantVar: "in", wantIn: "orders.In", wantOut: "orders.Out",
 		},
 		{
 			// error-only results leave Output empty; that is what tells a host
@@ -37,7 +36,7 @@ func Workflow(ctx context.Context, in In) (Out, error) {
 import "context"
 type In struct { Amount int64 }
 func Workflow(ctx context.Context, in In) error { return nil }`,
-			wantVar: "in", wantIn: "orders.In", wantOut: "", wantFunc: "Workflow",
+			wantVar: "in", wantIn: "orders.In", wantOut: "",
 		},
 		{
 			// A pointer parameter is keyed "*"+elem by addType, so the entry has
@@ -47,7 +46,7 @@ func Workflow(ctx context.Context, in In) error { return nil }`,
 import "context"
 type In struct { Amount int64 }
 func Workflow(ctx context.Context, in *In) error { return nil }`,
-			wantVar: "in", wantIn: "*orders.In", wantOut: "", wantFunc: "Workflow",
+			wantVar: "in", wantIn: "*orders.In", wantOut: "",
 		},
 		{
 			name: "slice input",
@@ -57,7 +56,7 @@ type In struct { Amount int64 }
 func Workflow(ctx context.Context, items []In) error { return nil }`,
 			// Collection IDs use Go spelling ("[]T"), not the language name
 			// ("array<T>"); the ID is what keys Types.
-			wantVar: "items", wantIn: "[]orders.In", wantOut: "", wantFunc: "Workflow",
+			wantVar: "items", wantIn: "[]orders.In", wantOut: "",
 		},
 		{
 			// A bare scalar never reaches Types at a non-payload boundary, so
@@ -66,14 +65,14 @@ func Workflow(ctx context.Context, items []In) error { return nil }`,
 			source: `package orders
 import "context"
 func Workflow(ctx context.Context, name string) error { return nil }`,
-			wantVar: "", wantIn: "", wantOut: "", wantFunc: "Workflow",
+			wantVar: "", wantIn: "", wantOut: "",
 		},
 		{
 			name: "no input at all",
 			source: `package orders
 import "context"
 func Workflow(ctx context.Context) error { return nil }`,
-			wantVar: "", wantIn: "", wantOut: "", wantFunc: "Workflow",
+			wantVar: "", wantIn: "", wantOut: "",
 		},
 		{
 			// The translator never seeds an unnamed parameter into locals, so the
@@ -83,7 +82,7 @@ func Workflow(ctx context.Context) error { return nil }`,
 import "context"
 type In struct { Amount int64 }
 func Workflow(context.Context, In) error { return nil }`,
-			wantVar: "", wantIn: "", wantOut: "", wantFunc: "Workflow",
+			wantVar: "", wantIn: "", wantOut: "",
 		},
 		{
 			// Two parameters sharing one type: picking either would be a guess.
@@ -92,7 +91,7 @@ func Workflow(context.Context, In) error { return nil }`,
 import "context"
 type In struct { Amount int64 }
 func Workflow(ctx context.Context, a, b In) error { return nil }`,
-			wantVar: "", wantIn: "", wantOut: "", wantFunc: "Workflow",
+			wantVar: "", wantIn: "", wantOut: "",
 		},
 		{
 			name: "typed output without typed input",
@@ -100,7 +99,7 @@ func Workflow(ctx context.Context, a, b In) error { return nil }`,
 import "context"
 type Out struct { OK bool }
 func Workflow(ctx context.Context) (Out, error) { return Out{}, nil }`,
-			wantVar: "", wantIn: "", wantOut: "orders.Out", wantFunc: "Workflow",
+			wantVar: "", wantIn: "", wantOut: "orders.Out",
 		},
 	}
 
@@ -111,9 +110,6 @@ func Workflow(ctx context.Context) (Out, error) { return Out{}, nil }`,
 				t.Fatalf("TranslateFileDetailed: %v", err)
 			}
 			entry := result.Entry
-			if entry.Function != test.wantFunc {
-				t.Errorf("Function = %q, want %q", entry.Function, test.wantFunc)
-			}
 			if entry.InputVar != test.wantVar {
 				t.Errorf("InputVar = %q, want %q", entry.InputVar, test.wantVar)
 			}

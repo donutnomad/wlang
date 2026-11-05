@@ -22,11 +22,18 @@ import (
 
 // Options configures Go to wlang translation.
 type Options struct {
-	FuncName         string
-	PackageAliases   map[string]string
-	Lang             string
-	Imports          []string
-	Filename         string
+	FuncName       string
+	PackageAliases map[string]string
+	Lang           string
+	Imports        []string
+	Filename       string
+	// Dir is the type-checking context. When set, the whole package is loaded
+	// and the source under Filename is overlaid on it, so package-level symbols
+	// declared in sibling files resolve. Package type errors are tolerated on top
+	// of the partial type information packages.Load still returns; only a package
+	// that cannot be loaded at all (import/vendor resolution failure) degrades to
+	// checking Filename on its own, and then sibling-file symbols are
+	// unavailable. Leave Dir empty to translate one standalone file.
 	Dir              string
 	EmbedImportMap   bool
 	LocalPackageName string
@@ -47,8 +54,9 @@ type Options struct {
 // descriptor backed, which keeps them consistent with what extractDescriptors
 // actually collected: error-only results, plain scalar parameters, and
 // parameters the body cannot reference (unnamed, or several sharing one type).
+// The translated function's own name is not repeated here: Result.FuncName
+// already carries it.
 type EntrySignature struct {
-	Function string
 	InputVar string
 	Input    string
 	Output   string
@@ -237,13 +245,23 @@ func loadTranslationUnit(src []byte, opts Options, filename string) (translation
 	}
 	loaded, err := packages.Load(cfg, ".")
 	if err != nil {
+		// Import-level failure (vendor / go list). Keep the long-standing
+		// tolerance and translate the file on its own; this is the only path
+		// where sibling-file symbols are unavailable.
 		return loadSingleFileUnit(src, filename, opts.Dir)
 	}
 	if len(loaded) != 1 {
 		return loadSingleFileUnit(src, filename, opts.Dir)
 	}
 	pkg := loaded[0]
-	if len(pkg.Errors) > 0 {
+	// Errors other than syntax errors are deliberately tolerated. A type error
+	// in one corner of the package (including the driver-level ListError go list
+	// reports for it) must not discard the package-wide type information the
+	// rest of the package provides: falling back to a single-file check used to
+	// lose every package-level symbol declared in sibling files, so identifiers
+	// that are functions (an activity marker, for example) came back as variable
+	// references. packages.Load still fills TypesInfo for the parts it checked.
+	if hasParseErrors(pkg.Errors) {
 		return loadSingleFileUnit(src, filename, opts.Dir)
 	}
 	for _, candidate := range pkg.Syntax {
@@ -254,6 +272,19 @@ func loadTranslationUnit(src []byte, opts Options, filename string) (translation
 		}
 	}
 	return loadSingleFileUnit(src, filename, opts.Dir)
+}
+
+// hasParseErrors reports whether the package has a syntax error.
+// Only a broken syntax tree forces the fallback to checking the translated file
+// on its own; type and driver-level errors leave the parsed package (and its
+// cross-file type information) usable.
+func hasParseErrors(errs []packages.Error) bool {
+	for _, e := range errs {
+		if e.Kind == packages.ParseError {
+			return true
+		}
+	}
+	return false
 }
 
 func loadSingleFileUnit(src []byte, filename, dir string) (translationUnit, error) {

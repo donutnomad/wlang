@@ -1789,6 +1789,19 @@ func prepareOutArg(out *types.OutArg, target reflect.Type, outByName map[string]
 				out.Name, cur.TypeName(), elemType)
 		}
 	}
+	if target.Kind() == reflect.Interface && !mapSurrogate {
+		// out 形参声明为 interface{}（宿主方法用 `out any`）时，目标是 record 且有 descriptor：
+		// 走 map[string]any surrogate，宿主按普通 Go map 解码，commit 再按 template 类型
+		// 还原成 record。标量目标保持原有 materialize 路径不变。
+		if _, hasDescriptor := registryDescriptor(registry, cur.TypeName()); hasDescriptor {
+			if _, isRecord := types.AsRecord(cur); isRecord {
+				mapType := reflect.TypeOf(map[string]any{})
+				ptr = reflect.New(mapType)
+				ptr.Elem().Set(reflect.MakeMap(mapType))
+				mapSurrogate = true
+			}
+		}
+	}
 	if target.Kind() == reflect.Interface {
 		if !ptr.Type().AssignableTo(target) {
 			return reflect.Value{}, nil, werr.Newf(werr.CodeType,

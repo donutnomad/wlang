@@ -153,6 +153,12 @@ func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.Ty
 	if firstErr != nil {
 		return nil, EntrySignature{}, firstErr
 	}
+	// body-local DTO：`var detail ChargeFailure` / `detail := ChargeFailure{}` 这类局部变量
+	// 不进入口或契约签名，但翻译出的 zero<T> 仍需要 descriptor，否则运行期报
+	// E_SYMBOL: type not registered。这里沿既有 addType 机制补齐。
+	if err := extractor.collectBodyLocalTypes(fn.Body); err != nil {
+		return nil, EntrySignature{}, err
+	}
 	for id, descriptor := range extractor.descriptors {
 		descriptor.Fingerprint = wltypes.DescriptorFingerprint(descriptor)
 		extractor.descriptors[id] = descriptor
@@ -217,7 +223,7 @@ func entryDescriptorSkipped(typ gotypes.Type) bool {
 // pointer parameter's descriptor is keyed "*"+elem and canonicalNamedID cannot
 // express that at all.
 func (e *descriptorExtractor) extractEntrySignature(fn *ast.FuncDecl) (EntrySignature, error) {
-	entry := EntrySignature{Function: fn.Name.Name}
+	var entry EntrySignature
 
 	name, typ, ok := entryInputParam(e.translator, fn.Type.Params)
 	if ok && !entryDescriptorSkipped(typ) {
@@ -538,4 +544,60 @@ func (e *descriptorExtractor) unsupported(pos token.Pos, reason string) error {
 		Filename: position.Filename, Line: position.Line, Column: position.Column,
 		Node: "serializable type", Reason: reason,
 	}
+}
+
+// collectBodyLocalTypes 为函数体内显式声明的局部 DTO 类型补 descriptor。
+//
+// 只收集同时满足 containsNamedDTO 的类型（与入口/契约边界同一套过滤），因此标量与
+// context/error 不会进入 Types。已有 descriptor 的类型由 addType 幂等复用。
+func (e *descriptorExtractor) collectBodyLocalTypes(body *ast.BlockStmt) error {
+	if body == nil {
+		return nil
+	}
+	var firstErr error
+	collect := func(typeExpr ast.Expr, pos token.Pos) {
+		if firstErr != nil || typeExpr == nil {
+			return
+		}
+		typ := e.translator.info.TypeOf(typeExpr)
+		if typ == nil || isErrorGoType(typ) || isContextLikeType(typ) || !containsNamedDTO(typ) {
+			return
+		}
+		if _, err := e.addType(typ, pos); err != nil {
+			firstErr = err
+		}
+	}
+	ast.Inspect(body, func(node ast.Node) bool {
+		if firstErr != nil {
+			return false
+		}
+		switch current := node.(type) {
+		case *ast.ValueSpec: // var x T
+			collect(current.Type, current.Pos())
+		case *ast.AssignStmt: // x := T{...} / x := &T{...}
+			if current.Tok != token.DEFINE {
+				return true
+			}
+			for _, rhs := range current.Rhs {
+				if literalType := compositeLiteralType(rhs); literalType != nil {
+					collect(literalType, rhs.Pos())
+				}
+			}
+		}
+		return true
+	})
+	return firstErr
+}
+
+// compositeLiteralType 返回复合字面量（含取地址）的类型表达式。
+func compositeLiteralType(expr ast.Expr) ast.Expr {
+	switch current := expr.(type) {
+	case *ast.CompositeLit:
+		return current.Type
+	case *ast.UnaryExpr:
+		if current.Op == token.AND {
+			return compositeLiteralType(current.X)
+		}
+	}
+	return nil
 }
