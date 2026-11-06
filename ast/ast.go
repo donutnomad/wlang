@@ -162,11 +162,16 @@ type Set struct {
 	Expr Node
 }
 
-// Return ends the program with a value.
+// Return ends the program or function with a value. Named resolves a single
+// variable after the function frame's deferred calls run. Results lists named
+// result parameters: Expr is evaluated first, its value(s) assigned to those
+// parameters, then deferred calls run, and the final tuple is read from the
+// parameters (Go named-result semantics). An empty Expr is a bare return.
 type Return struct {
 	Base
-	Expr  Node
-	Named string
+	Expr    Node
+	Named   string
+	Results []string
 }
 
 // IfStmt is the block form of if (also used by if expression statements).
@@ -230,8 +235,8 @@ type Routine struct {
 	Body []Node
 }
 
-// Defer registers a host call to run in LIFO order when the enclosing block
-// scope exits (LANGUAGE.md §3.7). Arguments are evaluated at defer-time and
+// Defer registers a host call to run in LIFO order when the nearest function
+// frame returns (LANGUAGE.md §3.3). Arguments are evaluated at defer-time and
 // captured; the deferred call sees those captured snapshots, not the values at
 // the time of execution.
 type Defer struct {

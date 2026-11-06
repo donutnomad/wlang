@@ -193,6 +193,32 @@ func (p *textParser) parseLet() (any, error) {
 func (p *textParser) parseReturn() (any, error) {
 	if p.peekLit("named") {
 		p.take()
+		if p.accept("(") {
+			var names []any
+			for {
+				name, err := p.expectIdent()
+				if err != nil {
+					return nil, err
+				}
+				names = append(names, name)
+				if !p.accept(",") {
+					break
+				}
+			}
+			if err := p.expect(")"); err != nil {
+				return nil, err
+			}
+			body := map[string]any{"named": names}
+			if p.accept("=") {
+				ex, err := p.parseExpr(0)
+				if err != nil {
+					return nil, err
+				}
+				body["expr"] = ex
+			}
+			_ = p.consumeLineEnd()
+			return map[string]any{"return": body}, nil
+		}
 		name, err := p.expectIdent()
 		if err != nil {
 			return nil, err

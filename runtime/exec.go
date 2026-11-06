@@ -55,9 +55,11 @@ const (
 // errReturnSig / errBreakSig / errContinueSig implement control flow via errors
 // so cross-function unwinding is trivial. Exec unwraps them.
 type errReturnSig struct {
-	v     types.Value
-	named string
-	path  string
+	v       types.Value
+	named   string
+	results []string
+	frame   *Scope
+	path    string
 }
 
 func (errReturnSig) Error() string { return "__signal:return" }
@@ -314,6 +316,21 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 		}
 		return v, sigNone, nil
 	case *ast.Return:
+		if len(x.Results) > 0 {
+			frame := e.scope.deferFrame()
+			if x.Expr != nil {
+				v, err := e.Eval(x.Expr)
+				if err != nil {
+					return types.Value{}, sigNone, err
+				}
+				if err := assignFrameResults(frame, x.Results, v, x.Path()); err != nil {
+					return types.Value{}, sigNone, err
+				}
+			}
+			return types.Value{}, sigReturn, errReturnSig{
+				results: x.Results, frame: frame, path: x.Path(),
+			}
+		}
 		if x.Named != "" {
 			return types.Value{}, sigReturn, errReturnSig{named: x.Named, path: x.Path()}
 		}
@@ -385,8 +402,8 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 }
 
 // execDefer evaluates the deferred host call's receiver and arguments now and
-// records them on the current scope. The actual invocation happens when the
-// enclosing block scope exits (LANGUAGE.md §3.7).
+// records them on the nearest function frame. The actual invocation happens
+// when that function returns (LANGUAGE.md §3.3).
 func (e *Executor) execDefer(x *ast.Defer) (types.Value, Signal, error) {
 	if x.Expr == nil && x.Call != nil {
 		x.Expr = x.Call
@@ -420,10 +437,11 @@ func (e *Executor) execDefer(x *ast.Defer) (types.Value, Signal, error) {
 	return nullV, sigNone, nil
 }
 
-// runDeferred executes any deferred calls recorded on the given scope in LIFO
-// order. Errors from deferred calls surface to the caller; control-flow
-// signals from deferred calls are not produced because deferred bodies are
-// single host calls.
+// runDeferred executes every deferred call recorded on the given function
+// frame in LIFO order. A failing deferred call does not stop the remaining
+// ones; the first error in drain order becomes the frame's deferred error.
+// Control-flow signals from deferred bodies are not produced because deferred
+// bodies are single calls.
 func (e *Executor) runDeferred(s *Scope) error {
 	if s == nil {
 		return nil
@@ -447,7 +465,53 @@ func (e *Executor) runDeferred(s *Scope) error {
 	return firstErr
 }
 
-func (e *Executor) resolveNamedReturn(s *Scope, rs errReturnSig) (errReturnSig, error) {
+// assignFrameResults stores an explicit return expression into the named
+// result parameters of the current function frame. Go evaluates the whole
+// expression first and then assigns; callers pass the already-evaluated value.
+func assignFrameResults(frame *Scope, names []string, v types.Value, path string) error {
+	if len(names) == 1 {
+		return frame.setLocal(names[0], v, path)
+	}
+	values, ok := types.UnpackTuple(v)
+	if !ok || len(values) != len(names) {
+		return werr.Newf(werr.CodeType,
+			"named return expects tuple arity %d, got %s", len(names), v.TypeName()).
+			WithPath(path)
+	}
+	for i, name := range names {
+		if err := frame.setLocal(name, values[i], path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveReturnValues reads the final return value after the function frame's
+// deferred calls have run. Named result lists are read from the frame root, so
+// deferred writes (including writes through captured closures) are visible;
+// blank "_" slots use the zero placeholder the translator declared there.
+func (e *Executor) resolveReturnValues(s *Scope, rs errReturnSig) (errReturnSig, error) {
+	if len(rs.results) > 0 {
+		frame := rs.frame
+		if frame == nil {
+			frame = s
+		}
+		values := make([]types.Value, len(rs.results))
+		for i, name := range rs.results {
+			v, ok := frame.localValue(name)
+			if !ok {
+				return rs, werr.Newf(werr.CodeSymbol,
+					"named return variable %q not found", name).WithPath(rs.path)
+			}
+			values[i] = v
+		}
+		if len(values) == 1 {
+			rs.v = values[0]
+		} else {
+			rs.v = types.NewTuple(values...)
+		}
+		return rs, nil
+	}
 	if rs.named == "" {
 		return rs, nil
 	}
@@ -460,52 +524,32 @@ func (e *Executor) resolveNamedReturn(s *Scope, rs errReturnSig) (errReturnSig, 
 	return rs, nil
 }
 
-// execBlock runs a sequence of statements within a new scope. Deferred calls
-// registered inside the block always run when the block exits, regardless of
-// whether the exit is via fall-through, return/break/continue signal, or
-// error propagation (LANGUAGE.md §3.7).
+// execBlock runs a sequence of statements within a new lexical scope. The
+// scope carries bindings only: defer registrations belong to the nearest
+// function frame and run when that function returns. Leaving the block via
+// fall-through, break/continue, return, or error does not run them
+// (LANGUAGE.md §3.3). Named returns are resolved at the function boundary
+// after the deferred calls run.
 func (e *Executor) execBlock(stmts []ast.Node) (types.Value, Signal, error) {
 	e.scope = e.scope.Push()
 	blockScope := e.scope
 	var last types.Value
 	last, _ = types.NewNull()
-	cleanup := func(v types.Value, sig Signal, err error) (types.Value, Signal, error) {
-		defErr := e.runDeferred(blockScope)
-		if rs, ok := err.(errReturnSig); ok && rs.named != "" {
-			resolved, rerr := e.resolveNamedReturn(blockScope, rs)
-			if rerr != nil {
-				err = rerr
-			} else {
-				err = resolved
-				v = resolved.v
-			}
-		}
+	leave := func(v types.Value, sig Signal, err error) (types.Value, Signal, error) {
 		e.scope = blockScope.Pop()
-		if defErr != nil && (err == nil || isControlSignalErr(err)) {
-			return v, sigNone, defErr
-		}
 		return v, sig, err
 	}
 	for _, s := range stmts {
 		v, sig, err := e.Exec(s)
 		if err != nil {
-			return cleanup(v, sig, err)
+			return leave(v, sig, err)
 		}
 		if sig != sigNone {
-			return cleanup(v, sig, nil)
+			return leave(v, sig, nil)
 		}
 		last = v
 	}
-	return cleanup(last, sigNone, nil)
-}
-
-func isControlSignalErr(err error) bool {
-	switch err.(type) {
-	case errReturnSig, errBreakSig, errContinueSig:
-		return true
-	default:
-		return false
-	}
+	return leave(last, sigNone, nil)
 }
 
 func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
@@ -538,25 +582,15 @@ func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
 			e.scope.Let(x.Index, types.NewValue(types.TInt64, int64(i)), "")
 		}
 		v, sig, err := runStatements(e, x.Do)
-		defErr := e.runDeferred(iterScope)
 		e.scope = iterScope.Pop()
 		if err != nil {
 			if _, isBreak := err.(errBreakSig); isBreak {
-				if defErr != nil {
-					return v, sigNone, defErr
-				}
 				break
 			}
 			if _, isCont := err.(errContinueSig); isCont {
-				if defErr != nil {
-					return v, sigNone, defErr
-				}
 				continue
 			}
 			return v, sigNone, err
-		}
-		if defErr != nil {
-			return v, sigNone, defErr
 		}
 		if sig == sigReturn {
 			return v, sigReturn, errReturnSig{v: v}
@@ -624,25 +658,15 @@ func (e *Executor) execFori(x *ast.Fori) (types.Value, Signal, error) {
 			e.scope.Let(x.Var, types.NewValue(types.TInt64, i), types.TInt64)
 		}
 		v, sig, err := runStatements(e, x.Do)
-		defErr := e.runDeferred(iterScope)
 		e.scope = iterScope.Pop()
 		if err != nil {
 			if _, isBreak := err.(errBreakSig); isBreak {
-				if defErr != nil {
-					return v, sigNone, defErr
-				}
 				break
 			}
 			if _, isCont := err.(errContinueSig); isCont {
-				if defErr != nil {
-					return v, sigNone, defErr
-				}
 				continue
 			}
 			return v, sigNone, err
-		}
-		if defErr != nil {
-			return v, sigNone, defErr
 		}
 		if sig == sigReturn {
 			return v, sigReturn, errReturnSig{v: v}
@@ -853,9 +877,26 @@ func containsReturnList(ns []ast.Node) bool {
 
 // RunProgram executes a full program and returns the program's result value.
 // Deferred calls registered at the program top level fire when the program
-// ends (LANGUAGE.md §3.7).
+// ends (LANGUAGE.md §3.3).
 func (e *Executor) RunProgram(p *ast.Program) (types.Value, error) {
 	topScope := e.scope
+	// The program body is an implicit function frame (LANGUAGE.md §3.3). A
+	// host may hand NewExecutor any scope; promote a non-root scope for the
+	// duration of the run so top-level defers attach to and drain from it.
+	restoredFrameRoot := false
+	oldFrameName := ""
+	if topScope != nil && !topScope.frameRoot {
+		oldFrameName = topScope.frameName
+		topScope.frameRoot = true
+		topScope.frameName = "main"
+		restoredFrameRoot = true
+	}
+	if restoredFrameRoot {
+		defer func() {
+			topScope.frameRoot = false
+			topScope.frameName = oldFrameName
+		}()
+	}
 	finish := func(v types.Value, err error) (types.Value, error) {
 		defErr := e.runDeferred(topScope)
 		if err == nil && defErr != nil {
@@ -865,15 +906,22 @@ func (e *Executor) RunProgram(p *ast.Program) (types.Value, error) {
 	}
 	finishReturn := func(rs errReturnSig) (types.Value, error) {
 		defErr := e.runDeferred(topScope)
-		if rs.named != "" {
-			resolved, err := e.resolveNamedReturn(topScope, rs)
+		if defErr != nil {
+			// Resolve the named value best-effort for diagnostics, but the
+			// deferred error keeps priority over a resolution failure.
+			if rs.named != "" || len(rs.results) > 0 {
+				if resolved, rerr := e.resolveReturnValues(topScope, rs); rerr == nil {
+					rs = resolved
+				}
+			}
+			return rs.v, defErr
+		}
+		if rs.named != "" || len(rs.results) > 0 {
+			resolved, err := e.resolveReturnValues(topScope, rs)
 			if err != nil {
 				return types.Value{}, err
 			}
 			rs = resolved
-		}
-		if defErr != nil {
-			return rs.v, defErr
 		}
 		return rs.v, nil
 	}
@@ -1027,6 +1075,17 @@ func (e *Executor) evalRoutine(x *ast.Routine) (types.Value, error) {
 						}
 						handle.complete(types.Value{}, ferr)
 						return
+					}
+					if rs.named != "" || len(rs.results) > 0 {
+						resolved, rerr := child.resolveReturnValues(topScope, rs)
+						if rerr != nil {
+							if onErr != nil {
+								onErr(ctx, rerr)
+							}
+							handle.complete(types.Value{}, rerr)
+							return
+						}
+						v2 = resolved.v
 					}
 					handle.complete(v2, nil)
 					return

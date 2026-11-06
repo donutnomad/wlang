@@ -24,9 +24,9 @@
   - defer 执行顺序保持 LIFO，闭包执行时可读写捕获变量。
 
 - 增加命名返回表达能力：
-  - JSON：`{"return":{"named":"err"}}`
-  - 语义：block/program/routine 退出时先执行 defer，再读取 `err` 的最终值。
-  - go2wlang 对 `func(...)(err error)` 初始化根作用域变量 `err`，把 `return expr` 翻成 `set err=expr` + `return named err`。
+  - JSON：单变量 `{"return":{"named":"err"}}`；多命名结果 `{"return":{"named":["out","err"]}}`，可带 `"expr"` 先求值并逐位赋给结果参数。
+  - 语义：函数帧（含顶层 program 与 routine body 的隐式函数帧）返回时先执行 defer，再读取命名结果的最终值；显式 `return out, err` 也在 defer 之前完成赋值。
+  - go2wlang 对 `func(...)(out T, err error)` 初始化函数帧根作用域的结果变量，把裸 `return` 与 `return expr...` 统一翻成命名结果列表（显式形式带 `expr`），入口 program、FuncLit 与结果类型列表由同一次结果字段解析生成。
 
 - 增加 array 原生方法：
   - `{"arr.push":[arr, value]}`：原地追加，返回 `null`。

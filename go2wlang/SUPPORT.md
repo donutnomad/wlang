@@ -63,8 +63,11 @@
 - `a, b = call()`
 - `_ = expr`
 - `return expr`
-- `return`（用于无返回值函数字面量）
+- `return a, b`（翻成 tuple 返回）
+- `return`（无返回值函数字面量；命名结果函数中的裸 return）
 - 命名返回值函数，例如 `func Rule(...) (err error)`
+- 多命名结果，例如 `func Rule(...) (out Out, err error)`、同组命名 `(a, b int64)`、空白 `_` 结果槽位
+- 显式 `return out, err`：先求值并赋给命名结果参数，再执行 defer，最后读取最终结果
 - `if cond { ... }`
 - `if cond { ... } else { ... }`
 - `if cond { ... } else if cond { ... }`

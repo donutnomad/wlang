@@ -210,7 +210,7 @@ Go struct 字段可通过 `json` 或 `yaml` tag 暴露给语言读取。
 | `routine` | 已具备 | 映射 Go `go` 关键字 |
 | `await` | 已具备 | 等待 `routineHandle` |
 | `expr` | 已具备 | 执行表达式并丢弃结果 |
-| `defer` | 已具备 | 作用域退出时 LIFO 执行调用 |
+| `defer` | 已具备 | 函数返回时 LIFO 执行调用（顶层 program 为隐式函数） |
 | `match` | 已具备 | 多分支值匹配 |
 | `select` | 已具备 | channel send / recv 多路选择 |
 
@@ -677,23 +677,41 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 | `routine` | 核心语句 | 通过 Go `go` 关键字启动宿主调用或语句块 |
 | `await` | 核心语句 | 等待 routine handle |
 | `expr` | 核心语句 | 显式执行表达式并丢弃结果 |
-| `defer` | 核心语句 | 作用域退出时执行宿主调用或函数值调用 |
+| `defer` | 核心语句 | 函数返回时执行宿主调用或函数值调用 |
 | `match` | 核心语句 | 多分支值匹配 |
 | `select` | 核心语句 | channel 多路选择 |
 
 #### `return`
 
-`return` 立即结束当前程序并返回一个 typed value。`return` 可以出现在顶层、`if` 分支、`foreach`、`fori` 或 `block` 内部。
+`return` 立即结束当前函数或程序并返回一个 typed value。`return` 可以出现在顶层、`if` 分支、`foreach`、`fori` 或 `block` 内部。
 
 ```json
 { "return": { "var": "total" } }
 ```
 
-命名返回读取当前作用域中的变量，并在 defer 执行后返回该变量的最终值：
+单字符串命名返回在函数帧边界按该帧及其外层作用域链查找变量（包括闭包捕获的外层变量）；内层 block 的局部变量在边界已退出，不在查找范围内。函数帧的 defer 按 LIFO 执行完后才解析该变量的最终值：
 
 ```json
 { "return": { "named": "err" } }
 ```
+
+`named` 也可以是结果参数名数组，表示一组命名结果；可带 `expr`。执行显式 `expr` 时先按 Go 规则求值整个表达式（多值结果为 tuple），再逐位赋给这些结果参数，然后执行函数帧的 defer，最后读取结果参数的最终值：
+
+```json
+{ "return": { "named": ["out", "err"], "expr": { "tuple": [
+  { "var": "out" }, { "var": "err" }
+] } } }
+```
+
+不带 `expr` 的数组形式是裸 return，同样在 defer drain 后读取最终结果：
+
+```json
+{ "return": { "named": ["out", "err"] } }
+```
+
+结果参数绑定在当前函数帧根作用域，由 translator 声明并做零值初始化；内层 block 的同名局部变量只影响 `expr` 中的名字解析，不改变 return 写入的结果参数。`_` 结果槽位仍按位置返回值：显式返回时取表达式值，裸 return 时取零值。结果个数为 1 时数组形式仍读写当前函数帧根的结果参数；单字符串形式保留按词法作用域链解析变量的既有行为。
+
+未使用命名结果列表的普通 `return` 表达式仍在 return 语句处求值；多返回 tuple 在此时固定，后续 deferred 修改不会回写该 tuple。这与 Go 未命名返回值的行为一致。
 
 #### `foreach`
 
@@ -858,7 +876,7 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 
 #### `defer`
 
-`defer` 记录一个宿主调用或函数值调用，在当前作用域退出时按 LIFO 顺序执行。receiver、函数值和参数在 `defer` 语句执行时求值并捕获。
+`defer` 记录一个宿主调用或函数值调用。它属于最近一次函数调用的栈帧，在该函数返回时按 LIFO 顺序执行。receiver、函数值和参数在 `defer` 语句执行时求值并捕获。
 
 ```json
 { "defer": { "Close": [{ "pkg": "audit" }, { "var": "id" }] } }
@@ -886,9 +904,16 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 语义规则：
 
 - `defer` 接受单个宿主调用或单个函数值调用。
-- 顶层 program 也是隐式作用域，顶层 defer 在 program 结束时执行。
-- `foreach`、`fori`、`if`、`select`、`routine.do` 的块作用域都会运行各自 defer。
-- deferred 调用返回的 Go `error` 仍按 host call 返回形态产生 typed value；调用自身产生的 `LangError` 会在原执行路径无错误时作为该作用域错误返回。
+- defer 归属于最近函数调用帧。函数声明调用、函数值/闭包调用、递归调用、`routine.do` 入口和顶层 program 各自建立独立函数帧；顶层 program 是隐式函数。
+- 词法块（`if`、`foreach`、`fori`、`select`、`match`）只承载变量绑定，不拥有 defer。块退出、循环 `break`/`continue`、块内 `return` 或错误传播都不会触发所属函数的 defer；这些 defer 统一在该函数返回时执行。
+- 闭包从已退出的词法块捕获的变量保持存活，deferred 闭包在函数返回时仍可读写这些变量。
+- 每个函数帧有独立 defer 栈。内层函数、递归调用、闭包调用和 routine 体只 drain 自己的栈，不消费调用者的 defer；deferred 函数内部再登记的 defer 归属于该 deferred 调用的函数帧。
+- 函数正常结束、提前 `return` 或已有的运行时错误退出，都会按 LIFO drain 该函数帧的 defer。命名返回值在 drain 完成后解析，因此 deferred 闭包对命名返回变量的修改可见；多命名结果列表同样在显式 `return` 赋值之后、drain 之后读取最终值。
+- drain 不因某个 deferred 调用失败而中止：其余 defer 继续执行，LIFO 执行顺序中的第一个 deferred 错误作为该函数帧的 deferred 错误。
+- 错误优先级：函数正常结束或经 `return` 退出时，deferred 错误成为调用结果并覆盖返回值；函数因已有 `LangError`（运行时错误、类型错误、`E_PANIC` 等）退出时，原错误保持优先，deferred 调用仍已执行。同一函数帧内，deferred 错误优先于命名返回解析错误与返回类型校验错误。
+- deferred 宿主调用的 Go `error` 返回值仍按宿主调用映射产生 typed value，并按 Go 语义丢弃；业务补偿返回的错误不会自动写入命名返回值。作者应把补偿结果存入临时变量（如 `compErr`），再显式汇总到命名 `err`；Temporal 官方 Saga 使用 `multierr.Append(err, compErr)`。只有调用求值或执行产生的 `LangError` 参与上述 deferred 错误规则。
+- `multierr` 等错误聚合类型的跨 wire 类型、cause 和 details 是否保留取决于 Temporal SDK 与序列化配置；本规范只规定 WLang 执行器内的 defer 错误规则，不承诺跨 wire 聚合形态。
+- defer 不提供 Go `panic`/`recover` 语义。`panic` 仍按既有规则转为 `E_PANIC` 中断；deferred 调用不会 recover 该错误，也不会替换它的错误身份。
 
 #### 函数值
 
@@ -2043,7 +2068,7 @@ Registry 按 Go 函数签名构造 wflang typed value：
 
 Go `error` 在上述形态中保持为普通语言值。程序需要通过 tuple 解构、变量传递或调用 `Error` 方法显式处理它。
 
-Host panic、context cancel、预算耗尽、类型错误、权限错误和 nil receiver 错误使用 `LangError` 报告，直接中断当前执行路径。已完成的副作用不会自动回滚；事务语义由宿主基于 `context.Context` 和返回结果处理。
+Host panic、context cancel、预算耗尽、类型错误、权限错误和 nil receiver 错误使用 `LangError` 报告，直接中断当前执行路径。已完成的副作用不会自动回滚；事务语义由宿主基于 `context.Context` 和返回结果处理。defer 的 drain 不中止、deferred 错误优先级与“已有错误优先”规则见 §3.3 `defer`。
 
 ### 9.1.2 `null` receiver 调用
 

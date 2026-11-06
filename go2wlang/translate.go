@@ -149,11 +149,15 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 			}
 		}
 	}
+	results := resultSpecs(fn.Type.Results)
+	namedResults := namedResultSpecs(results)
+	t.namedResults = namedResults
+	for _, result := range namedResults {
+		t.locals.add(result.source)
+	}
 	var prefix []any
-	if name, typ, ok := namedReturn(fn.Type.Results); ok {
-		t.namedReturn = name
-		t.locals.add(name)
-		prefix = append(prefix, map[string]any{"let": map[string]any{name: t.zeroLiteral(typ)}})
+	if len(namedResults) > 0 {
+		prefix = t.resultZeroBindings(namedResults)
 	}
 	body, err := t.stmtList(fn.Body.List)
 	if err != nil {
@@ -211,7 +215,7 @@ type translator struct {
 	locals           *localScopes
 	localPackageName string
 	packagePath      string
-	namedReturn      string
+	namedResults     []resultSpec
 	descriptorNames  map[string]bool
 }
 
@@ -455,8 +459,8 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 		return t.assign(x)
 	case *ast.ReturnStmt:
 		if len(x.Results) == 0 {
-			if t.namedReturn != "" {
-				return []any{map[string]any{"return": map[string]any{"named": t.namedReturn}}}, nil
+			if len(t.namedResults) > 0 {
+				return []any{map[string]any{"return": map[string]any{"named": t.resultNames()}}}, nil
 			}
 			return []any{map[string]any{"return": lit("null", nil)}}, nil
 		}
@@ -472,11 +476,11 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 		if len(values) > 1 {
 			ex = map[string]any{"tuple": values}
 		}
-		if t.namedReturn != "" {
-			return []any{
-				map[string]any{"set": map[string]any{t.namedReturn: ex}},
-				map[string]any{"return": map[string]any{"named": t.namedReturn}},
-			}, nil
+		if len(t.namedResults) > 0 {
+			return []any{map[string]any{"return": map[string]any{
+				"named": t.resultNames(),
+				"expr":  ex,
+			}}}, nil
 		}
 		return []any{map[string]any{"return": ex}}, nil
 	case *ast.IfStmt:
@@ -1689,25 +1693,19 @@ func (t *translator) funcLit(x *ast.FuncLit) (any, error) {
 			}
 		}
 	}
-	returns := []any{}
-	if x.Type.Results != nil {
-		for _, field := range x.Type.Results.List {
-			typ := t.functionFieldTypeName(field.Type)
-			if typ == "" {
-				return nil, t.unsupported(field.Type, "function result type is not supported", "")
-			}
-			count := 1
-			if len(field.Names) > 0 {
-				count = len(field.Names)
-			}
-			for i := 0; i < count; i++ {
-				returns = append(returns, typ)
-			}
+	results := resultSpecs(x.Type.Results)
+	namedResults := namedResultSpecs(results)
+	returns := make([]any, len(results))
+	for i, result := range results {
+		typ := t.functionFieldTypeName(result.typ)
+		if typ == "" {
+			return nil, t.unsupported(result.typ, "function result type is not supported", "")
 		}
+		returns[i] = typ
 	}
 	var body []any
-	prevNamed := t.namedReturn
-	t.namedReturn = ""
+	prevNamed := t.namedResults
+	t.namedResults = namedResults
 	err := t.locals.withFrame(func() error {
 		if x.Type.Params != nil {
 			for _, field := range x.Type.Params.List {
@@ -1716,11 +1714,20 @@ func (t *translator) funcLit(x *ast.FuncLit) (any, error) {
 				}
 			}
 		}
+		for _, result := range namedResults {
+			t.locals.add(result.source)
+		}
 		var err error
 		body, err = t.stmtList(x.Body.List)
-		return err
+		if err != nil {
+			return err
+		}
+		if len(namedResults) > 0 {
+			body = append(t.resultZeroBindings(namedResults), body...)
+		}
+		return nil
 	})
-	t.namedReturn = prevNamed
+	t.namedResults = prevNamed
 	if err != nil {
 		return nil, err
 	}
@@ -2365,15 +2372,68 @@ func (t *translator) zeroLiteral(e ast.Expr) any {
 	}
 }
 
-func namedReturn(results *ast.FieldList) (string, ast.Expr, bool) {
-	if results == nil || len(results.List) != 1 {
-		return "", nil, false
+// resultSpec is one result position in source order. A grouped declaration
+// (a, b int) yields one spec per name; an unnamed result keeps an empty name.
+// A blank "_" result keeps its position but binds a private placeholder so the
+// runtime can assign and read it without exposing a source-visible name.
+type resultSpec struct {
+	name   string
+	source string
+	typ    ast.Expr
+}
+
+func resultSpecs(results *ast.FieldList) []resultSpec {
+	if results == nil {
+		return nil
 	}
-	field := results.List[0]
-	if len(field.Names) != 1 {
-		return "", nil, false
+	var specs []resultSpec
+	for _, field := range results.List {
+		if len(field.Names) == 0 {
+			specs = append(specs, resultSpec{typ: field.Type})
+			continue
+		}
+		for _, name := range field.Names {
+			spec := resultSpec{name: name.Name, source: name.Name, typ: field.Type}
+			if name.Name == "_" {
+				spec.name = fmt.Sprintf("__wlang_blank_result_%d", len(specs))
+			}
+			specs = append(specs, spec)
+		}
 	}
-	return field.Names[0].Name, field.Type, true
+	return specs
+}
+
+// namedResultSpecs returns the results only when the Go source names them. The
+// Go parser rejects mixed named/unnamed results, so a non-empty name means the
+// whole list is named.
+func namedResultSpecs(specs []resultSpec) []resultSpec {
+	for _, spec := range specs {
+		if spec.name != "" {
+			return specs
+		}
+	}
+	return nil
+}
+
+// resultNames is the runtime binding order used by return statements.
+func (t *translator) resultNames() []any {
+	names := make([]any, len(t.namedResults))
+	for i, result := range t.namedResults {
+		names[i] = result.name
+	}
+	return names
+}
+
+// resultZeroBindings declares the named result parameters at the function
+// frame root, matching Go's zero initialization before the body runs.
+func (t *translator) resultZeroBindings(results []resultSpec) []any {
+	bindings := make([]any, 0, len(results))
+	for _, result := range results {
+		bindings = append(bindings, map[string]any{"let": map[string]any{
+			result.name: t.zeroLiteral(result.typ),
+		}})
+	}
+	return bindings
 }
 
 func isIdentCall(call *ast.CallExpr, name string) bool {

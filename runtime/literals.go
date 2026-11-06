@@ -552,11 +552,7 @@ func (e *Executor) execSelect(x *ast.SelectStmt) (types.Value, Signal, error) {
 		e.scope = e.scope.Push()
 		bodyScope := e.scope
 		cleanup := func(v types.Value, sig Signal, err error) (types.Value, Signal, error) {
-			defErr := e.runDeferred(bodyScope)
 			e.scope = bodyScope.Pop()
-			if err == nil && defErr != nil {
-				return v, sigNone, defErr
-			}
 			return v, sig, err
 		}
 		if sc.BindVal != "" && sc.BindVal != "_" {

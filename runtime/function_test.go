@@ -467,7 +467,7 @@ func TestDeferredClosureRunsInLIFOOrder(t *testing.T) {
 	}
 }
 
-func TestDeferredClosureErrorSurfacesFromBlockReturn(t *testing.T) {
+func TestDeferredClosureErrorSurfacesFromFunctionReturn(t *testing.T) {
 	src := `[
 		{"if":{
 			"cond":{"literal":{"type":"boolean","value":"true"}},

@@ -141,9 +141,16 @@ func (f *pseudoFormatter) stmt(n ast.Node, indent int) {
 	case *ast.Set:
 		f.line(indent, fmt.Sprintf("%s = %s", x.Name, f.expr(x.Expr)))
 	case *ast.Return:
-		if x.Named != "" {
+		switch {
+		case len(x.Results) > 0:
+			head := "return named (" + strings.Join(x.Results, ", ") + ")"
+			if x.Expr != nil {
+				head += " = " + f.expr(x.Expr)
+			}
+			f.line(indent, head)
+		case x.Named != "":
 			f.line(indent, "return named "+x.Named)
-		} else {
+		default:
 			f.line(indent, "return "+f.expr(x.Expr))
 		}
 	case *ast.IfStmt:

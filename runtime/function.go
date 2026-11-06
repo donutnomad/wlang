@@ -148,16 +148,18 @@ func (e *Executor) invokePreparedFuncCall(call preparedFuncCall) (types.Value, e
 		e.scope.Let(p.Name, arg, "")
 	}
 
-	v, sig, err := runStatements(e, cl.body)
+	v, _, err := runStatements(e, cl.body)
 	defErr := e.runDeferred(callScope)
 	if err != nil {
 		if rs, ok := err.(errReturnSig); ok {
-			resolved, rerr := e.resolveNamedReturn(callScope, rs)
-			if rerr != nil {
-				return types.Value{}, rerr
-			}
+			// The deferred error wins over named-return resolution and return
+			// type validation, matching the documented frame error priority.
 			if defErr != nil {
 				return types.Value{}, defErr
+			}
+			resolved, rerr := e.resolveReturnValues(callScope, rs)
+			if rerr != nil {
+				return types.Value{}, rerr
 			}
 			return e.checkFunctionReturn(cl, resolved.v, call.path)
 		}
@@ -165,9 +167,6 @@ func (e *Executor) invokePreparedFuncCall(call preparedFuncCall) (types.Value, e
 	}
 	if defErr != nil {
 		return types.Value{}, defErr
-	}
-	if sig == sigReturn {
-		return e.checkFunctionReturn(cl, v, call.path)
 	}
 	return e.checkFunctionReturn(cl, v, call.path)
 }

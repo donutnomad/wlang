@@ -221,6 +221,36 @@
 - When: 编译并执行
 - Then: 按各自语义通过，非法形态返回对应诊断
 
+### TC-073 defer 归属最近函数帧
+- Spec: §3.3 defer
+- Given: 同一函数在 `if`、嵌套 `if`、`foreach`/`fori` 块内登记 defer，循环内含 `break`/`continue`
+- When: 执行到函数正常返回
+- Then: 块退出与 `break`/`continue` 均不执行 defer；所有登记在函数返回时按 LIFO 执行，顺序与同形原生 Go 一致；循环每轮的登记累计到函数帧
+
+### TC-074 独立函数帧与命名返回
+- Spec: §3.3 defer / §3.3 函数值
+- Given: 外层函数、内层函数、递归调用、routine body 各自登记 defer；deferred 闭包从已退出的 `if` 块捕获变量并改写命名返回值；defer 实参在登记后变化
+- When: 逐层调用并 `await` routine handle
+- Then: 每个函数帧只 drain 自己的 defer，互不消费；闭包捕获的已退出块变量仍可读写；实参保持登记时的值；命名返回值在 drain 后解析并反映 deferred 闭包的修改
+
+### TC-075 defer 失败与运行时错误优先级
+- Spec: §3.3 defer / §9.1 错误模型
+- Given: 函数帧登记多个 defer，其中后登记项产生 `LangError`；另有用例在已有运行时错误退出前登记 defer，以及 deferred 宿主调用返回业务 `error` 值
+- When: 函数返回或错误退出
+- Then: 失败项不中止 drain，其余 defer 仍执行；正常/`return` 退出时 LIFO 首个 deferred `LangError` 成为调用结果并保留诊断码；已有运行时错误退出时原错误保持优先且 defer 仍执行；deferred 宿主调用的业务 `error` 返回值被丢弃、不覆盖命名返回，作者需用 `compErr` + 显式汇总；defer 不实现 Go `panic`/`recover`
+
+### TC-076 多命名结果与显式/裸 return
+- Spec: §3.3 `return` / §3.3 defer
+- Given: 函数 `(out T, err error)`、同组命名 `(a, b int64)`、`_` 槽位；defer 分别修改 `out` 与 `err`；显式 `return out, err`、`return value, nil`、`return tupleProducingCall()`、裸 `return`；内层 block 同名 shadow；嵌套闭包/递归多次调用；同名未命名 tuple 返回
+- When: 在 WLang 与同形原生 Go 上执行，并逐次调用闭包/递归
+- Then: 显式表达式先求值再赋给结果参数，defer 按 LIFO 执行，最终读取修改后的命名结果；裸 return 读取最终结果；shadow 只影响表达式名字解析，返回写入帧根结果参数；`_` 槽位显式返回值即返回值、裸返回为零值；每次调用/递归帧独立；未命名 tuple 仍在 return 处快照
+
+### TC-077 go2wlang 多命名结果翻译
+- Spec: §3.3 `return` / go2wlang 支持矩阵
+- Given: 入口函数 `(out OrderOutput, err error)`、嵌套 FuncLit 命名结果、`_`、tuple-producing call
+- When: `TranslateFile` 生成 JSON 并由 engine 编译执行
+- Then: 入口 program 与 FuncLit 都生成零值结果绑定和 `named` 结果列表；`returns` 类型列表与结果名来自同一次结果字段解析；显式 return 携带 `expr`，裸 return 不带；deferred 写入在最终结果中可见
+
 ---
 
 ## §2.5 Go 宿主桥接

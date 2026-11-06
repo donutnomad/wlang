@@ -19,7 +19,8 @@ type varBinding struct {
 }
 
 // deferredCall captures a host call with its receiver/arguments snapshot, to
-// be executed in LIFO order when the enclosing scope unwinds (LANGUAGE.md §3.7).
+// be executed in LIFO order when the enclosing function frame returns
+// (LANGUAGE.md §3.3).
 type deferredCall struct {
 	op     string
 	recv   types.Value
@@ -77,18 +78,33 @@ func (s *Scope) setValueValidator(validator valueValidator) {
 	}
 }
 
-// PushDeferred records a deferred host call on this scope frame.
+// PushDeferred records a deferred host call on the nearest function frame.
 func (s *Scope) PushDeferred(op string, recv types.Value, args []types.Value, path string) {
-	s.deferred = append(s.deferred, deferredCall{
+	frame := s.deferFrame()
+	frame.deferred = append(frame.deferred, deferredCall{
 		op: op, recv: recv, args: args, path: path, kind: deferredHostCall,
 	})
 }
 
-// PushDeferredFunc records a deferred function call on this scope frame.
+// PushDeferredFunc records a deferred function call on the nearest function
+// frame.
 func (s *Scope) PushDeferredFunc(fn types.Value, args []types.Value, path string) {
-	s.deferred = append(s.deferred, deferredCall{
+	frame := s.deferFrame()
+	frame.deferred = append(frame.deferred, deferredCall{
 		fn: fn, fnArgs: args, path: path, kind: deferredFuncCall,
 	})
+}
+
+// deferFrame returns the nearest function frame. Lexical blocks only carry
+// bindings: a defer belongs to the function invocation that registered it.
+// The top-level program and a routine body each have their own root frame.
+func (s *Scope) deferFrame() *Scope {
+	for cur := s; cur != nil; cur = cur.parent {
+		if cur.frameRoot {
+			return cur
+		}
+	}
+	return s
 }
 
 // PopDeferred returns the deferred calls slice in LIFO order and clears it.
@@ -467,6 +483,34 @@ func (s *Scope) Lookup(name string) (types.Value, bool) {
 		}
 	}
 	return types.Value{}, false
+}
+
+// localValue returns a binding declared directly on this scope. Named result
+// parameters live on the function frame root; reading them must ignore
+// same-named block locals.
+func (s *Scope) localValue(name string) (types.Value, bool) {
+	b, ok := s.vars[name]
+	if !ok {
+		return types.Value{}, false
+	}
+	return b.val, true
+}
+
+// setLocal writes a binding declared directly on this scope without searching
+// outward. Return statements use it to assign named result parameters even
+// when an inner block shadows the same name.
+func (s *Scope) setLocal(name string, v types.Value, path string) error {
+	b, ok := s.vars[name]
+	if !ok {
+		return werr.Newf(werr.CodeSymbol,
+			"named return variable %q not found", name).WithPath(path)
+	}
+	if !b.writable {
+		return werr.Newf(werr.CodeReadonlyVar,
+			"named return variable %q is read-only", name).WithPath(path)
+	}
+	b.val = v
+	return nil
 }
 
 // LookupBinding returns the value and assignment permission for a variable.

@@ -213,6 +213,21 @@ func dumpNode(n ast.Node) (any, error) {
 		}
 		return map[string]any{"set": map[string]any{x.Name: ed}}, nil
 	case *ast.Return:
+		if len(x.Results) > 0 {
+			names := make([]any, len(x.Results))
+			for i, name := range x.Results {
+				names[i] = name
+			}
+			body := map[string]any{"named": names}
+			if x.Expr != nil {
+				ed, err := dumpNode(x.Expr)
+				if err != nil {
+					return nil, err
+				}
+				body["expr"] = ed
+			}
+			return map[string]any{"return": body}, nil
+		}
 		if x.Named != "" {
 			return map[string]any{"return": map[string]any{"named": x.Named}}, nil
 		}
@@ -973,6 +988,13 @@ func walkSchema(path string, v any, issues *[]SchemaIssue, inStmt bool) {
 			}
 			return
 		}
+		// A return wrapper is only multi-key when it names result parameters
+		// and carries the explicit expression to assign; a plain return body is
+		// an ordinary expression.
+		if k == "return" {
+			walkReturnSchema(path+"/"+k, body, issues)
+			return
+		}
 		// Composite operators (let/set/foreach/fori/try/if/array/routine/await)
 		// have a body whose shape is dictated by the operator itself, not
 		// the single-key rule. We recurse into the inner expression
@@ -995,6 +1017,24 @@ func walkSchema(path string, v any, issues *[]SchemaIssue, inStmt bool) {
 			})
 		}
 		_ = inStmt
+	}
+}
+
+// walkReturnSchema validates either the named-result wrapper
+// {"named":[...],"expr":...} or a plain return expression. The wrapper's keys
+// are structural; only the expression child is a program node.
+func walkReturnSchema(path string, body any, issues *[]SchemaIssue) {
+	m, ok := body.(map[string]any)
+	if !ok {
+		walkSchema(path, body, issues, false)
+		return
+	}
+	if _, named := m["named"]; !named {
+		walkSchema(path, body, issues, false)
+		return
+	}
+	if expr, ok := m["expr"]; ok {
+		walkSchema(path+"/expr", expr, issues, false)
 	}
 }
 
@@ -1126,6 +1166,10 @@ func walkLint(path string, v any, st *lintState) {
 			} else {
 				st.complexity++
 			}
+			if k == "return" {
+				walkReturnLint(path+"/return", body, st)
+				continue
+			}
 			// TC-855: capability checks for package calls.
 			// TC-882: deprecation warning for package calls.
 			if !reservedOperators[k] && st.reg != nil {
@@ -1165,6 +1209,23 @@ func walkLint(path string, v any, st *lintState) {
 			}
 			walkLint(path+"/"+k, body, st)
 		}
+	}
+}
+
+// walkReturnLint skips the structural named-result wrapper keys and lints only
+// its expression child.
+func walkReturnLint(path string, body any, st *lintState) {
+	m, ok := body.(map[string]any)
+	if !ok {
+		walkLint(path, body, st)
+		return
+	}
+	if _, named := m["named"]; !named {
+		walkLint(path, body, st)
+		return
+	}
+	if expr, ok := m["expr"]; ok {
+		walkLint(path+"/expr", expr, st)
 	}
 }
 

@@ -30,7 +30,7 @@ Typical use cases:
 - **Typed execution**: literals, arrays, maps, structs, tuples, channels, function values, and host signatures are validated.
 - **Explicit error model**: Go `error` returns become ordinary `error` values or tuple slots; panic, context cancellation, and budget exhaustion remain runtime failures.
 - **Control flow**: `if`, `match`, `foreach`, `fori`, `break`, `continue`, `return`, `defer`, `routine`, `await`, and `select`.
-- **Closures and deferred calls**: function values capture lexical variables by shared cell semantics and can be stored, called, and deferred.
+- **Closures and deferred calls**: function values capture lexical variables by shared cell semantics and can be stored, called, and deferred; each function invocation owns an independent defer stack.
 - **Tooling**: `wlfmt` formats JSON into stable JSON or pseudocode; `go2wl` translates a supported Go subset into executable wlang JSON.
 
 ## Quick Start
@@ -191,6 +191,7 @@ Core values and collections:
 - struct literals for registered Go struct types
 - `chan<T>` with `ch.send`, `ch.recv`, `ch.close`, `ch.len`, `ch.cap`
 - `tuple<...>` values and destructuring
+- Named result lists: `{"return":{"named":["out","err"]}}` and `{"return":{"named":["out","err"],"expr":...}}` assign result parameters before deferred calls and read their final values after the drain
 - first-class `func<...>` values with lexical capture
 
 Statements and control flow:
@@ -201,7 +202,7 @@ Statements and control flow:
 - `foreach` over arrays and maps
 - `fori`
 - `break`, `continue`, `return`, named return
-- `defer` over host calls and function calls
+- `defer` over host calls and function calls, scoped to the nearest function frame with Go-compatible LIFO execution at return
 - `routine`, `await`
 - `select` over channel send, receive, and default cases
 - `panic`

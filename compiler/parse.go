@@ -693,14 +693,55 @@ func parseSet(body any, path string) (ast.Node, error) {
 }
 
 func parseReturn(body any, path string) (ast.Node, error) {
-	if m, ok := body.(map[string]any); ok && len(m) == 1 {
+	if m, ok := body.(map[string]any); ok {
 		if raw, ok := m["named"]; ok {
-			name, ok := raw.(string)
-			if !ok || name == "" {
+			switch named := raw.(type) {
+			case string:
+				if named == "" {
+					return nil, werr.Newf(werr.CodeASTShape,
+						"return.named must be a non-empty string").WithPath(path + "/named")
+				}
+				if len(m) != 1 {
+					return nil, werr.Newf(werr.CodeASTShape,
+						"return.named string accepts no sibling fields").WithPath(path)
+				}
+				return &ast.Return{Base: ast.Base{P: path}, Named: named}, nil
+			case []any:
+				if len(named) == 0 {
+					return nil, werr.Newf(werr.CodeASTShape,
+						"return.named result list must not be empty").WithPath(path + "/named")
+				}
+				results := make([]string, len(named))
+				for i, item := range named {
+					name, ok := item.(string)
+					if !ok || name == "" {
+						return nil, werr.Newf(werr.CodeASTShape,
+							"return.named[%d] must be a non-empty string", i).
+							WithPath(fmt.Sprintf("%s/named/%d", path, i))
+					}
+					results[i] = name
+				}
+				ret := &ast.Return{Base: ast.Base{P: path}, Results: results}
+				rawExpr, hasExpr := m["expr"]
+				if hasExpr {
+					if len(m) != 2 {
+						return nil, werr.Newf(werr.CodeASTShape,
+							"return.named list accepts only an optional expr").WithPath(path)
+					}
+					expr, err := parseExpr(rawExpr, path+"/expr")
+					if err != nil {
+						return nil, err
+					}
+					ret.Expr = expr
+				} else if len(m) != 1 {
+					return nil, werr.Newf(werr.CodeASTShape,
+						"return.named list accepts only an optional expr").WithPath(path)
+				}
+				return ret, nil
+			default:
 				return nil, werr.Newf(werr.CodeASTShape,
-					"return.named must be a non-empty string").WithPath(path)
+					"return.named must be a string or an array of strings").WithPath(path + "/named")
 			}
-			return &ast.Return{Base: ast.Base{P: path}, Named: name}, nil
 		}
 	}
 	expr, err := parseExpr(body, path)
@@ -954,7 +995,7 @@ func parseRoutine(body any, path string) (ast.Node, error) {
 	return &ast.Routine{Base: ast.Base{P: path}, Call: call}, nil
 }
 
-// parseDefer parses {"defer": <hostCall-or-function-call>} (LANGUAGE.md §3.7).
+// parseDefer parses {"defer": <hostCall-or-function-call>} (LANGUAGE.md §3.3).
 func parseDefer(body any, path string) (ast.Node, error) {
 	m, ok := body.(map[string]any)
 	if !ok {

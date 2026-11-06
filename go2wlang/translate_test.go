@@ -271,7 +271,7 @@ func OrderWorkflow(ctx workflow.Context, runner workflow.Runner, input OrderInpu
 	}
 	got := string(out)
 	for _, needle := range []string{
-		`"named": "err"`,
+		`"named": [`,
 		`"fn": {`,
 		`"call": {`,
 		`"arr.push":`,
@@ -622,7 +622,7 @@ func TestExampleOrderWorkflowTranslates(t *testing.T) {
 	}
 	got := string(out)
 	for _, needle := range []string{
-		`"named": "err"`,
+		`"named": [`,
 		`"arr.push"`,
 		`"arr.get"`,
 		`"arr.len"`,

@@ -16,7 +16,7 @@
 | **闭包 `func(...){...}`？** | ✅ 能翻 → `{"fn":{params,returns,do}}`；参数**必须命名**、参数/返回类型必须可翻 | :1539-1590 |
 | **duration / time.Duration？** | ❌ 无 duration 类型。**用 string（如 "30s"）在 host 侧 ParseDuration** | 见 §3 |
 | **`i = i + 1` 作 for post？** | ❌ 只支持 `i++`/`i--`/`i += step`/`i -= step` | :1011-1030 |
-| **`return a, b`（多返回值）？** | ❌ return 只支持零或一个值。**返回 struct 或 tuple-producing host 值** | :332 |
+| **`return a, b`（多返回值）？** | ✅ 翻成 `{"return":{"tuple":[a,b]}}`；命名结果另见 `return.named` 列表 | `translate.go` ReturnStmt |
 | **可变参数展开 `fn(xs...)`？** | ❌ | SUPPORT.md |
 | **`&T{}`（取地址复合字面量）？** | ❌ `address-of expression is not supported`。用局部变量 + `&local`（但 `&local` 也只在输出参数位合法） | :1848 |
 | **map/slice/array 字面量？** | ✅ 全支持（省略键、带键、键值元素） | :1643-1696 |
@@ -116,7 +116,6 @@ Go struct 里的**指针字段** `F *T`：
 
 | 构造 | 报错原文 | 行号 |
 |---|---|---|
-| 多返回值 return | `return supports zero or one value` | :332 |
 | 独立 `i++`/`i--`（非 for post） | `standalone inc/dec is only supported as for post` | :410 |
 | `&index`（`&xs[i]`） | `address-of index is not supported` | :1846 |
 | `&expr`（`&rp`/`&T{}`） | `address-of expression is not supported` | :1848 |
@@ -184,7 +183,7 @@ Go struct 里的**指针字段** `F *T`：
 | `else if` | 嵌套 `{"if":...}` 进 else（:557-561） | :557 |
 | 计数 `for i:=from; i<to; i+=step` | `{from, to, step, body}`（:990-993） | :990 |
 | `for i,v := range xs` | `{"foreach": loop}`（:942） | :942 |
-| `return expr` | `{"return": expr}`（:344）；命名返回 `{"return":{"named":...}}`（:327）；无值 `{"return":{"literal":null}}`（:329） | :327-344 |
+| `return expr` | `{"return": expr}`；命名返回 `{"return":{"named":"err"}}` 或 `{"return":{"named":["out","err"],"expr":...}}`；无值 `{"return":{"literal":null}}` | `translate.go` ReturnStmt |
 | 表达式/条件 `switch` | case clauses（:532 起） | :530+ |
 | 类型 switch | `type.is` / `type.assert`（:73 SUPPORT） | :620+ |
 | `select` | 含 send/receive/default case | :1087+ |
@@ -200,7 +199,6 @@ Go struct 里的**指针字段** `F *T`：
 | 行 | 报错原文 | 类别 |
 |---|---|---|
 | 319 | only var declarations are supported | 声明 |
-| 332 | return supports zero or one value | **多返回值 return ❌** |
 | 362 | branch statement is not supported | goto 等 |
 | 367 | panic requires exactly one argument | panic |
 | 410 | standalone inc/dec is only supported as for post | **独立 `i++` ❌** |
