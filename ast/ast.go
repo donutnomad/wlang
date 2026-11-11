@@ -182,28 +182,43 @@ type IfStmt struct {
 	Else []Node
 }
 
-// Foreach iterates an array.
+// Foreach iterates an array. Elements are read when their iteration starts,
+// so writes to later elements made by the body are observed.
 type Foreach struct {
 	Base
 	Target Node
 	As     string
 	Index  string // optional
+	Label  string // optional; target of labelled break/continue
 	Do     []Node
 }
 
-// Fori integer range loop.
+// Fori is a counted loop. With Cond set it follows Go's three-clause for
+// statement instead: Cond is evaluated before every iteration, Post runs after
+// every iteration, and body writes to Var carry into the next iteration while
+// each iteration still binds its own copy of Var. To and Step are unused then.
 type Fori struct {
 	Base
-	Var  string
-	From Node
-	To   Node
-	Step Node // optional
-	Do   []Node
+	Var   string
+	From  Node
+	To    Node
+	Step  Node // optional
+	Cond  Node
+	Post  []Node
+	Label string // optional; target of labelled break/continue
+	Do    []Node
 }
 
-// Break and Continue are control flow statements.
-type Break struct{ Base }
-type Continue struct{ Base }
+// Break and Continue are control flow statements. A non-empty Label targets
+// the enclosing loop carrying that label instead of the innermost loop.
+type Break struct {
+	Base
+	Label string
+}
+type Continue struct {
+	Base
+	Label string
+}
 
 // Panic raises a runtime panic.
 type Panic struct {

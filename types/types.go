@@ -195,6 +195,14 @@ func FuncType(params, returns []string) string {
 // ArrayType returns the language type name array<T>.
 func ArrayType(elem string) string { return "array<" + elem + ">" }
 
+// NewNilArray is the zero value of array<T>: a nil slice with the carrier type
+// NewArray would use. It has length 0 and encodes as JSON null, like a nil
+// Go slice.
+func NewNilArray(elem string) Value {
+	carrier := reflect.ValueOf(buildTypedSlice(elem, nil))
+	return Value{typ: ArrayType(elem), val: reflect.Zero(carrier.Type()).Interface()}
+}
+
 // NewArray builds an array<T> typed value. Every element's TypeName must match
 // the declared element type (TC-014, TC-904).
 func NewArray(elem string, elems []Value) (Value, error) {

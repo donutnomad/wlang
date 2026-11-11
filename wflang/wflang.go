@@ -285,6 +285,12 @@ func astWalkChildren(n ast.Node, fn func(ast.Node)) {
 		if x.Step != nil {
 			fn(x.Step)
 		}
+		if x.Cond != nil {
+			fn(x.Cond)
+		}
+		for _, s := range x.Post {
+			fn(s)
+		}
 		for _, s := range x.Do {
 			fn(s)
 		}

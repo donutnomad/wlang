@@ -592,7 +592,7 @@ func TestArrayHelpersRejectInvalidAccessAndBudget(t *testing.T) {
 		{
 			name: "len target type mismatch",
 			src: `[
-				{"return":{"arr.len":[{"literal":{"type":"string","value":"bad"}}]}}
+				{"return":{"arr.len":[{"literal":{"type":"boolean","value":"true"}}]}}
 			]`,
 			code: werr.CodeType,
 		},

@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/donutnomad/wlang/ast"
 	werr "github.com/donutnomad/wlang/errors"
@@ -376,6 +378,9 @@ func mapSet(e *Executor, c *ast.Call) (types.Value, error) {
 	if err != nil {
 		return types.Value{}, werr.Newf(werr.CodeType, "map.set value: %v", err).WithPath(c.Path())
 	}
+	if rv.IsNil() {
+		return types.Value{}, werr.New(werr.CodeRuntime, "assignment to entry in nil map").WithPath(c.Path())
+	}
 	rv.SetMapIndex(rk, rvalue)
 	null, _ := types.NewNull()
 	return null, nil
@@ -444,7 +449,7 @@ func mapKeys(e *Executor, c *ast.Call) (types.Value, error) {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
 			"map.keys expects (map), got %d args", len(c.Args)).WithPath(c.Path())
 	}
-	keys := rv.MapKeys()
+	keys := sortedMapKeys(rv)
 	out := make([]types.Value, 0, len(keys))
 	for _, k := range keys {
 		out = append(out, types.NewValue(keyType, k.Interface()))
@@ -461,12 +466,43 @@ func mapValues(e *Executor, c *ast.Call) (types.Value, error) {
 		return types.Value{}, werr.Newf(werr.CodeASTShape,
 			"map.values expects (map), got %d args", len(c.Args)).WithPath(c.Path())
 	}
-	iter := rv.MapRange()
 	out := make([]types.Value, 0, rv.Len())
-	for iter.Next() {
-		out = append(out, types.NewValue(valType, iter.Value().Interface()))
+	for _, key := range sortedMapKeys(rv) {
+		out = append(out, types.NewValue(valType, rv.MapIndex(key).Interface()))
 	}
 	return types.NewArray(valType, out)
+}
+
+// sortedMapKeys returns the keys in ascending order so that map.keys,
+// map.values and range over a map are deterministic across replays.
+func sortedMapKeys(rv reflect.Value) []reflect.Value {
+	keys := rv.MapKeys()
+	sort.Slice(keys, func(i, j int) bool { return mapKeyLess(keys[i], keys[j]) })
+	return keys
+}
+
+func mapKeyLess(a, b reflect.Value) bool {
+	for a.Kind() == reflect.Interface && !a.IsNil() {
+		a = a.Elem()
+	}
+	for b.Kind() == reflect.Interface && !b.IsNil() {
+		b = b.Elem()
+	}
+	if a.Kind() == b.Kind() {
+		switch a.Kind() {
+		case reflect.String:
+			return a.String() < b.String()
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return a.Int() < b.Int()
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			return a.Uint() < b.Uint()
+		case reflect.Float32, reflect.Float64:
+			return a.Float() < b.Float()
+		case reflect.Bool:
+			return !a.Bool() && b.Bool()
+		}
+	}
+	return fmt.Sprintf("%T:%v", a.Interface(), a.Interface()) < fmt.Sprintf("%T:%v", b.Interface(), b.Interface())
 }
 
 // ---------- select statement ----------

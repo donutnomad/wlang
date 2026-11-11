@@ -739,7 +739,9 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 - 未提供 `index` 时只写入 `as` 变量。
 - 省略 `index` 时，语义与不需要下标的场景一致。
 - 每轮迭代创建新的 block 作用域，`as` 和 `index` 是该 block 的局部变量。
+- 迭代次数在循环开始时按数组长度确定；元素在该轮开始时读取，循环体对后续元素的写入可见（同 Go 对 slice 的 range）。
 - `break` 退出最近一层 `foreach`，`continue` 跳到下一轮。
+- 可选 `label` 给循环命名，供带标签的 `break` / `continue` 指向。
 
 #### `fori`
 
@@ -768,6 +770,24 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 - `from`、`to`、`step` 的类型必须一致，推荐 `int64`。
 - `step` 为 0 返回诊断错误。
 - 循环每轮按顺序执行 `do` 语句。
+- 可选 `label` 给循环命名，供带标签的 `break` / `continue` 指向。
+
+`fori` 带 `cond` 时是 Go 三段式 `for` 循环，`to` 与 `step` 不使用：
+
+```json
+{
+  "fori": {
+    "var": "i",
+    "from": { "literal": { "type": "int64", "value": "0" } },
+    "cond": { "<": [{ "var": "i" }, { "arr.len": [{ "var": "queue" }] }] },
+    "post": [{ "set": { "i": { "+": [{ "var": "i" }, { "literal": { "type": "int64", "value": "1" } }] } } }],
+    "do": []
+  }
+}
+```
+
+- 每轮开始前求值 `cond`，为 `false` 时结束循环；`do` 结束（含 `continue`）后执行 `post`。
+- 每轮绑定一份 `var` 的副本，闭包捕获的是本轮的值；`do` 对 `var` 的写入带入下一轮（同 Go 1.22 起的 `for` 语义）。
 
 #### `break` 与 `continue`
 
@@ -778,15 +798,16 @@ typed literal 指定 `int64` 后只匹配 `int64` 或明确允许从 `int64` 转
 ```
 
 ```json
-{ "continue": {} }
+{ "continue": "outer" }
 ```
 
 语义规则：
 
 - `break` 退出最近一层循环。
 - `continue` 跳过当前循环剩余语句，进入下一次迭代。
+- 值是字符串时作用于带同名 `label` 的外层循环，中间各层循环一并退出。
 - 在循环外使用返回 `E_INVALID_CONTROL_FLOW`。
-- 嵌套循环中只影响最近一层循环。
+- 不带标签时嵌套循环中只影响最近一层循环。
 - `return` 优先级高于 `break` 和 `continue`，会直接结束整个程序。
 
 #### `panic`
@@ -1105,9 +1126,18 @@ session := engine.NewSession(wflang.SessionOptions{
 |------|------|------|
 | 追加 | `{ "arr.push": [ { "var": "xs" }, value ] }` | 原地追加，返回 `null` |
 | 读取 | `{ "arr.get": [ xs, index ] }` | 返回元素 `T` |
-| 长度 | `{ "arr.len": [ xs ] }` | 返回 `int64` |
+| 写入 | `{ "arr.set": [ { "var": "xs" }, index, value ] }` | 写入元素，返回 `null` |
+| 切片 | `{ "arr.slice": [ xs, low, high ] }` | 返回 `xs[low:high]` |
+| 长度 | `{ "arr.len": [ xs ] }` | 返回 `int64`；参数是 `string` 时返回字节数 |
+| 容量 | `{ "arr.cap": [ xs ] }` | 返回 `int64` |
 
 `arr.push` 的第一个参数必须是数组变量，追加后更新该变量。元素类型必须匹配 `array<T>` 的 `T`，数组长度受 `Budget.MaxArrayLength` 约束。
+
+数组采用 Go slice 语义：`arr.set` 写入共享的底层数组，同一数组赋给的其他变量与 `arr.slice` 得到的切片都能看到；`arr.push` 与 Go `append` 相同，容量够时复用底层数组。`array<T>` 的零值（`{"zero": "array<T>"}`）是长度为 0 的 nil 数组，JSON 编码为 `null`；空字面量编码为 `[]`。
+
+record（结构体）采用 Go 值语义：赋给变量、作为参数、存入数组、map 或其他 record 字段时复制，嵌套 record 一并复制，其中的数组、map 与指针仍然共享。
+
+`map.keys` 与 `map.values` 按 key 升序返回，同一个 map 每次得到相同顺序。`map.set` 写 nil map 返回运行时错误。整数运算支持 `%`（与 Go 相同，结果符号随被除数），除数为 0 返回运行时错误。
 
 ---
 

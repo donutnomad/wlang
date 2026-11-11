@@ -64,13 +64,26 @@ type errReturnSig struct {
 
 func (errReturnSig) Error() string { return "__signal:return" }
 
-type errBreakSig struct{}
+type errBreakSig struct{ label string }
 
 func (errBreakSig) Error() string { return "__signal:break" }
 
-type errContinueSig struct{}
+type errContinueSig struct{ label string }
 
 func (errContinueSig) Error() string { return "__signal:continue" }
+
+// loopSignal classifies a body error for a loop labelled label: handled
+// break/continue signals targeting this loop, or propagate everything else
+// (including labelled signals aimed at an outer loop).
+func loopSignal(err error, label string) (brk, cont bool) {
+	switch sig := err.(type) {
+	case errBreakSig:
+		return sig.label == "" || sig.label == label, false
+	case errContinueSig:
+		return false, sig.label == "" || sig.label == label
+	}
+	return false, false
+}
 
 func sigToErr(s Signal) error {
 	switch s {
@@ -365,13 +378,13 @@ func (e *Executor) Exec(n ast.Node) (types.Value, Signal, error) {
 			return types.Value{}, sigNone, werr.New(werr.CodeInvalidControlFlow,
 				"break outside of loop").WithPath(x.Path())
 		}
-		return types.Value{}, sigBreak, errBreakSig{}
+		return types.Value{}, sigBreak, errBreakSig{label: x.Label}
 	case *ast.Continue:
 		if e.maxLoopCtx == 0 {
 			return types.Value{}, sigNone, werr.New(werr.CodeInvalidControlFlow,
 				"continue outside of loop").WithPath(x.Path())
 		}
-		return types.Value{}, sigContinue, errContinueSig{}
+		return types.Value{}, sigContinue, errContinueSig{label: x.Label}
 	case *ast.Panic:
 		v, err := e.Eval(x.Expr)
 		if err != nil {
@@ -557,8 +570,10 @@ func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
 	if err != nil {
 		return types.Value{}, sigNone, err
 	}
-	// Only array<T> types are iterable for now.
-	items, elemName, ok := extractArrayItems(tv)
+	// Only array<T> types are iterable. Like Go's range over a slice, the
+	// length is fixed when the loop starts and each element is read when its
+	// iteration begins.
+	items, elemName, ok := arrayCarrier(tv)
 	if !ok {
 		return types.Value{}, sigNone, werr.Newf(werr.CodeType,
 			"foreach target must be array, got %s", tv.TypeName()).WithPath(x.Target.Path())
@@ -567,7 +582,8 @@ func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
 	defer func() { e.maxLoopCtx-- }()
 	var last types.Value
 	last, _ = types.NewNull()
-	for i, item := range items {
+	n := items.Len()
+	for i := 0; i < n; i++ {
 		e.loopCount++
 		if e.budget.MaxLoopIterations > 0 && e.loopCount > e.budget.MaxLoopIterations {
 			return types.Value{}, sigNone, werr.Newf(werr.CodeBudget,
@@ -576,7 +592,7 @@ func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
 		e.scope = e.scope.Push()
 		iterScope := e.scope
 		if x.As != "" {
-			e.scope.Let(x.As, types.NewValue(elemName, item), "")
+			e.scope.Let(x.As, types.NewValue(elemName, items.Index(i).Interface()), "")
 		}
 		if x.Index != "" {
 			e.scope.Let(x.Index, types.NewValue(types.TInt64, int64(i)), "")
@@ -584,13 +600,14 @@ func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
 		v, sig, err := runStatements(e, x.Do)
 		e.scope = iterScope.Pop()
 		if err != nil {
-			if _, isBreak := err.(errBreakSig); isBreak {
+			brk, cont := loopSignal(err, x.Label)
+			if brk {
 				break
 			}
-			if _, isCont := err.(errContinueSig); isCont {
+			if cont {
 				continue
 			}
-			return v, sigNone, err
+			return v, sig, err
 		}
 		if sig == sigReturn {
 			return v, sigReturn, errReturnSig{v: v}
@@ -601,6 +618,9 @@ func (e *Executor) execForeach(x *ast.Foreach) (types.Value, Signal, error) {
 }
 
 func (e *Executor) execFori(x *ast.Fori) (types.Value, Signal, error) {
+	if x.Cond != nil {
+		return e.execForCond(x)
+	}
 	fromV, err := e.Eval(x.From)
 	if err != nil {
 		return types.Value{}, sigNone, err
@@ -660,18 +680,95 @@ func (e *Executor) execFori(x *ast.Fori) (types.Value, Signal, error) {
 		v, sig, err := runStatements(e, x.Do)
 		e.scope = iterScope.Pop()
 		if err != nil {
-			if _, isBreak := err.(errBreakSig); isBreak {
+			brk, cont := loopSignal(err, x.Label)
+			if brk {
 				break
 			}
-			if _, isCont := err.(errContinueSig); isCont {
+			if cont {
 				continue
 			}
-			return v, sigNone, err
+			return v, sig, err
 		}
 		if sig == sigReturn {
 			return v, sigReturn, errReturnSig{v: v}
 		}
 		last = v
+	}
+	return last, sigNone, nil
+}
+
+// execForCond runs the Go three-clause form: the loop scope holds Var, every
+// iteration binds its own copy (closures keep the value of their iteration),
+// the copy's final value carries over, and Post advances it before the next
+// Cond check.
+func (e *Executor) execForCond(x *ast.Fori) (types.Value, Signal, error) {
+	fromV, err := e.Eval(x.From)
+	if err != nil {
+		return types.Value{}, sigNone, err
+	}
+	e.scope = e.scope.Push()
+	loopScope := e.scope
+	defer func() { e.scope = loopScope.Pop() }()
+	if x.Var != "" {
+		loopScope.Let(x.Var, fromV, "")
+	}
+	e.maxLoopCtx++
+	defer func() { e.maxLoopCtx-- }()
+	var last types.Value
+	last, _ = types.NewNull()
+	for {
+		e.loopCount++
+		if e.budget.MaxLoopIterations > 0 && e.loopCount > e.budget.MaxLoopIterations {
+			return types.Value{}, sigNone, werr.New(werr.CodeBudget,
+				"MaxLoopIterations exceeded").WithPath(x.Path())
+		}
+		e.scope = loopScope.Push()
+		iterScope := e.scope
+		if x.Var != "" {
+			current, _ := loopScope.localValue(x.Var)
+			iterScope.Let(x.Var, current, "")
+		}
+		condV, err := e.Eval(x.Cond)
+		if err != nil {
+			e.scope = loopScope
+			return types.Value{}, sigNone, err
+		}
+		ok, isBool := condV.Go().(bool)
+		if !isBool {
+			e.scope = loopScope
+			return types.Value{}, sigNone, werr.Newf(werr.CodeType,
+				"fori.cond must be boolean, got %s", condV.TypeName()).WithPath(x.Cond.Path())
+		}
+		if !ok {
+			e.scope = loopScope
+			break
+		}
+		v, sig, err := runStatements(e, x.Do)
+		if x.Var != "" {
+			if current, found := iterScope.localValue(x.Var); found {
+				if setErr := loopScope.setLocal(x.Var, current, x.Path()); setErr != nil {
+					e.scope = loopScope
+					return types.Value{}, sigNone, setErr
+				}
+			}
+		}
+		e.scope = loopScope
+		if err != nil {
+			brk, cont := loopSignal(err, x.Label)
+			if brk {
+				break
+			}
+			if !cont {
+				return v, sig, err
+			}
+		} else if sig == sigReturn {
+			return v, sigReturn, errReturnSig{v: v}
+		} else {
+			last = v
+		}
+		if _, _, err := runStatements(e, x.Post); err != nil {
+			return types.Value{}, sigNone, err
+		}
 	}
 	return last, sigNone, nil
 }

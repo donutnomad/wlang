@@ -71,9 +71,9 @@ func New() *Registry {
 }
 
 const (
-	maxDescriptorCount      = 1024
-	maxDescriptorDepth      = 64
-	maxDescriptorFields     = 4096
+	maxDescriptorCount  = 1024
+	maxDescriptorDepth  = 64
+	maxDescriptorFields = 4096
 	// Bounds the fully expanded zero carrier for records and fixed arrays.
 	maxDescriptorZeroValues = int64(1 << 20)
 )
@@ -542,7 +542,7 @@ func (r *Registry) ZeroValue(typeName, path string) (types.Value, error) {
 		return r.zeroDescriptor(descriptor, path, map[string]bool{})
 	}
 	if strings.HasPrefix(typeName, "array<") && strings.HasSuffix(typeName, ">") {
-		return types.NewArray(typeName[6:len(typeName)-1], nil)
+		return types.NewNilArray(typeName[6 : len(typeName)-1]), nil
 	}
 	if k, v, ok := splitMapTypeName(typeName); ok {
 		kt, err := primitiveReflectType(k)
@@ -604,7 +604,11 @@ func (r *Registry) zeroDescriptor(descriptor types.TypeDescriptor, path string, 
 	case types.TypeKindPointer:
 		return types.NewValue(descriptor.LanguageName, nil), nil
 	case types.TypeKindSlice:
-		return types.NewValue(descriptor.LanguageName, []any(nil)), nil
+		name := descriptor.LanguageName
+		if strings.HasPrefix(name, "array<") && strings.HasSuffix(name, ">") {
+			return types.NewNilArray(name[6 : len(name)-1]), nil
+		}
+		return types.NewValue(name, []any(nil)), nil
 	case types.TypeKindArray:
 		items := make([]any, descriptor.Length)
 		for i := range items {

@@ -156,6 +156,9 @@ func (f *pseudoFormatter) stmt(n ast.Node, indent int) {
 	case *ast.IfStmt:
 		f.ifStmt(x, indent)
 	case *ast.Foreach:
+		if x.Label != "" {
+			f.line(indent, x.Label+":")
+		}
 		head := "foreach " + x.As
 		if x.Index != "" {
 			head += ", " + x.Index
@@ -164,6 +167,17 @@ func (f *pseudoFormatter) stmt(n ast.Node, indent int) {
 		f.blockLines(x.Do, indent+1)
 		f.line(indent, "}")
 	case *ast.Fori:
+		if x.Label != "" {
+			f.line(indent, x.Label+":")
+		}
+		if x.Cond != nil {
+			f.line(indent, fmt.Sprintf("for %s := %s; %s {", x.Var, f.expr(x.From), f.expr(x.Cond)))
+			f.blockLines(x.Do, indent+1)
+			f.line(indent, "} post {")
+			f.blockLines(x.Post, indent+1)
+			f.line(indent, "}")
+			return
+		}
 		step := ""
 		if x.Step != nil {
 			step = "; step " + f.expr(x.Step)
@@ -173,9 +187,9 @@ func (f *pseudoFormatter) stmt(n ast.Node, indent int) {
 		f.blockLines(x.Do, indent+1)
 		f.line(indent, "}")
 	case *ast.Break:
-		f.line(indent, "break")
+		f.line(indent, strings.TrimSpace("break "+x.Label))
 	case *ast.Continue:
-		f.line(indent, "continue")
+		f.line(indent, strings.TrimSpace("continue "+x.Label))
 	case *ast.Panic:
 		f.line(indent, "panic("+f.expr(x.Expr)+")")
 	case *ast.ExprStmt:

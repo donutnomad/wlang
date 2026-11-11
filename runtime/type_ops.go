@@ -219,37 +219,18 @@ func copyBuiltin(e *Executor, c *ast.Call) (types.Value, error) {
 	if err != nil {
 		return types.Value{}, err
 	}
-	dst, elem, ok := extractArrayItems(dstV)
+	dst, elem, ok := arrayCarrier(dstV)
 	if !ok {
 		return types.Value{}, werr.Newf(werr.CodeType, "copy dst must be array, got %s", dstV.TypeName()).WithPath(c.Args[0].Path())
 	}
-	src, srcElem, ok := extractArrayItems(srcV)
+	src, srcElem, ok := arrayCarrier(srcV)
 	if !ok {
 		return types.Value{}, werr.Newf(werr.CodeType, "copy src must be array, got %s", srcV.TypeName()).WithPath(c.Args[1].Path())
 	}
-	if elem != srcElem {
+	if elem != srcElem || dst.Type() != src.Type() {
 		return types.Value{}, werr.Newf(werr.CodeType, "copy element type mismatch %s vs %s", elem, srcElem).WithPath(c.Path())
 	}
-	n := len(dst)
-	if len(src) < n {
-		n = len(src)
-	}
-	next := make([]types.Value, 0, len(dst))
-	for i, raw := range dst {
-		if i < n {
-			next = append(next, types.NewValue(elem, src[i]))
-		} else {
-			next = append(next, types.NewValue(elem, raw))
-		}
-	}
-	newArr, err := types.NewArray(elem, next)
-	if err != nil {
-		return types.Value{}, err
-	}
-	if err := e.scope.Set(target.Name, newArr); err != nil {
-		return types.Value{}, err
-	}
-	return types.NewValue(types.TInt64, int64(n)), nil
+	return types.NewValue(types.TInt64, int64(reflect.Copy(dst, src))), nil
 }
 
 func complexBuiltin(e *Executor, c *ast.Call) (types.Value, error) {

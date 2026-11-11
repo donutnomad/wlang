@@ -230,9 +230,11 @@ func parseNodeWithKey(key string, body any, path string) (ast.Node, error) {
 	case "fori":
 		return parseFori(body, nodePath)
 	case "break":
-		return &ast.Break{Base: ast.Base{P: nodePath}}, nil
+		label, _ := body.(string)
+		return &ast.Break{Base: ast.Base{P: nodePath}, Label: label}, nil
 	case "continue":
-		return &ast.Continue{Base: ast.Base{P: nodePath}}, nil
+		label, _ := body.(string)
+		return &ast.Continue{Base: ast.Base{P: nodePath}, Label: label}, nil
 	case "panic":
 		expr, err := parseExpr(body, nodePath)
 		if err != nil {
@@ -851,6 +853,7 @@ func parseForeach(body any, path string) (ast.Node, error) {
 	}
 	as, _ := m["as"].(string)
 	idx, _ := m["index"].(string)
+	label, _ := m["label"].(string)
 	if as != "" && idx != "" && as == idx {
 		return nil, werr.Newf(werr.CodeASTShape,
 			"foreach.as and foreach.index must differ").WithPath(path)
@@ -859,7 +862,7 @@ func parseForeach(body any, path string) (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Foreach{Base: ast.Base{P: path}, Target: target, As: as, Index: idx, Do: do}, nil
+	return &ast.Foreach{Base: ast.Base{P: path}, Target: target, As: as, Index: idx, Label: label, Do: do}, nil
 }
 
 func parseFori(body any, path string) (ast.Node, error) {
@@ -869,9 +872,25 @@ func parseFori(body any, path string) (ast.Node, error) {
 			"fori body must be object").WithPath(path)
 	}
 	vr, _ := m["var"].(string)
+	label, _ := m["label"].(string)
 	from, err := parseExpr(m["from"], path+"/from")
 	if err != nil {
 		return nil, err
+	}
+	if rawCond, ok := m["cond"]; ok {
+		cond, err := parseExpr(rawCond, path+"/cond")
+		if err != nil {
+			return nil, err
+		}
+		post, err := parseStatements(toArr(m["post"]), path+"/post")
+		if err != nil {
+			return nil, err
+		}
+		do, err := parseStatements(toArr(m["do"]), path+"/do")
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Fori{Base: ast.Base{P: path}, Var: vr, From: from, Cond: cond, Post: post, Label: label, Do: do}, nil
 	}
 	to, err := parseExpr(m["to"], path+"/to")
 	if err != nil {
@@ -888,7 +907,7 @@ func parseFori(body any, path string) (ast.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Fori{Base: ast.Base{P: path}, Var: vr, From: from, To: to, Step: step, Do: do}, nil
+	return &ast.Fori{Base: ast.Base{P: path}, Var: vr, From: from, To: to, Step: step, Label: label, Do: do}, nil
 }
 
 // parseMatch parses a multi-way value-equality dispatch (§14.2):

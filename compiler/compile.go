@@ -270,6 +270,16 @@ func foldNode(n ast.Node) (ast.Node, error) {
 			}
 			x.Step = step
 		}
+		if x.Cond != nil {
+			cond, err := foldNode(x.Cond)
+			if err != nil {
+				return nil, err
+			}
+			x.Cond = cond
+			if err := foldBlock(x.Post); err != nil {
+				return nil, err
+			}
+		}
 		return x, foldBlock(x.Do)
 	case *ast.Routine:
 		if x.Call != nil {

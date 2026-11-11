@@ -249,13 +249,12 @@ func dumpNode(n ast.Node) (any, error) {
 		if x.Index != "" {
 			body["index"] = x.Index
 		}
+		if x.Label != "" {
+			body["label"] = x.Label
+		}
 		return map[string]any{"foreach": body}, nil
 	case *ast.Fori:
 		from, err := dumpNode(x.From)
-		if err != nil {
-			return nil, err
-		}
-		to, err := dumpNode(x.To)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +262,28 @@ func dumpNode(n ast.Node) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		body := map[string]any{"var": x.Var, "from": from, "to": to, "do": do}
+		body := map[string]any{"var": x.Var, "from": from, "do": do}
+		if x.Label != "" {
+			body["label"] = x.Label
+		}
+		if x.Cond != nil {
+			cond, err := dumpNode(x.Cond)
+			if err != nil {
+				return nil, err
+			}
+			post, err := dumpNodeList(x.Post)
+			if err != nil {
+				return nil, err
+			}
+			body["cond"] = cond
+			body["post"] = post
+			return map[string]any{"fori": body}, nil
+		}
+		to, err := dumpNode(x.To)
+		if err != nil {
+			return nil, err
+		}
+		body["to"] = to
 		if x.Step != nil {
 			st, err := dumpNode(x.Step)
 			if err != nil {
@@ -273,8 +293,14 @@ func dumpNode(n ast.Node) (any, error) {
 		}
 		return map[string]any{"fori": body}, nil
 	case *ast.Break:
+		if x.Label != "" {
+			return map[string]any{"break": x.Label}, nil
+		}
 		return map[string]any{"break": map[string]any{}}, nil
 	case *ast.Continue:
+		if x.Label != "" {
+			return map[string]any{"continue": x.Label}, nil
+		}
 		return map[string]any{"continue": map[string]any{}}, nil
 	case *ast.Panic:
 		ed, err := dumpNode(x.Expr)
@@ -629,6 +655,14 @@ func walkPath(n ast.Node, target string) (ast.Node, bool) {
 				return r, true
 			}
 		}
+		if r, ok := walkPath(x.Cond, target); ok {
+			return r, true
+		}
+		for _, s := range x.Post {
+			if r, ok := walkPath(s, target); ok {
+				return r, true
+			}
+		}
 		for _, s := range x.Do {
 			if r, ok := walkPath(s, target); ok {
 				return r, true
@@ -763,6 +797,12 @@ func walkChildren(n ast.Node, fn func(ast.Node)) {
 		fn(x.To)
 		if x.Step != nil {
 			fn(x.Step)
+		}
+		if x.Cond != nil {
+			fn(x.Cond)
+		}
+		for _, s := range x.Post {
+			fn(s)
 		}
 		for _, s := range x.Do {
 			fn(s)

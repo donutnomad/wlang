@@ -58,9 +58,12 @@
 - `var x T`
 - `x := expr`
 - `x = expr`
-- `x += expr`, `x -= expr`, `x *= expr`, `x /= expr`
+- `x += expr`, `x -= expr`, `x *= expr`, `x /= expr`, `x %= expr`
+- `x++`、`x--`（变量、字段与元素）
 - `a, b := call()`
-- `a, b = call()`
+- `a, b = call()`：已存在的变量（包括 `:=` 复用的变量）被更新，不在内层块里另建同名变量
+- `a, b = x, y`、`a, b := x, y`、`a, b = b, a`：先按顺序求值左侧下标与全部右值，再依次赋值
+- `const` 声明（使用处折叠成字面量）
 - `_ = expr`
 - `return expr`
 - `return a, b`（翻成 tuple 返回）
@@ -71,19 +74,14 @@
 - `if cond { ... }`
 - `if cond { ... } else { ... }`
 - `if cond { ... } else if cond { ... }`
-- `if init; cond { ... }`
-- 表达式 `switch` 和条件 `switch`
+- `if init; cond { ... }`：init 声明的变量只在该 `if` 内可见，遮蔽同名外层变量
+- 表达式 `switch` 和条件 `switch`：tag 只求值一次；`break` 退出 `switch`
 - 类型 switch，生成 `type.is` / `type.assert`
-- 计数循环：`for i := from; i < to; i++ { ... }`
-- 带步长的计数循环：`for i := from; i < to; i += step { ... }`
-- 反向计数循环：`for i := len(xs)-1; i >= 0; i-- { ... }`
-- range 循环：`for i, item := range xs { ... }`
-- range 循环：`for _, item := range xs { ... }`
-- `break`
-- `continue`
-- 标签语句透传其内部语句
-- 带标签的 `break`
-- 带标签的 `continue`
+- 三段式循环 `for i := from; cond; post { ... }`：每轮求值 `cond`，`post` 可以是任意简单语句，循环体对 `i` 的写入带入下一轮，闭包捕获每轮自己的 `i`
+- range 循环：`for i := range xs`（`i` 是下标）、`for i, item := range xs`、`for _, item := range xs`、`for range xs`；长度在开始时固定，元素在每轮开始时读取
+- `for i := range n`（`n` 为 `int`/`int64`）
+- `for k, v := range m`：按 key 升序遍历；遍历中删除的未访问 key 被跳过
+- `break`、`continue`，包括带标签的形式和 `switch`/`select` 内的 `break`
 - `panic(expr)`
 - `defer pkg.Call(args...)`
 - `defer receiver.Call(args...)`
@@ -94,17 +92,14 @@
 - channel 发送语句：`ch <- value`
 - 包含发送、接收和 default case 的 `select`。
 
-当前范围外：
+翻译期拒绝（诊断带源码位置与写法名称）：
 
-- `goto`
-- 循环 post 子句外的独立 `i++` 或 `i--`。
-- 省略 init、condition 和 post 的 `for`。
-- 含多个 init 或 post 语句的 `for`。
+- `goto`、`fallthrough`。
+- 省略 init 或 condition 的 `for`（`for {}`、`for cond {}`）；init 不是 `i := from`。
+- `range` 遍历 string、channel、函数、指针，或 `int64` 以外的整数类型；`for k, v = range`（用 `=`）。
 - `defer` 非调用表达式。
-- 带参数的 `go` 函数字面量调用。
-- 包级变量。
-- `init` 函数。
-- `recover`。
+- 包级变量、`init` 函数。
+- `recover`、`min`、`max`、`clear`、`print` 等未列出的内建函数。
 
 ## 表达式
 
@@ -117,10 +112,11 @@
 - 浮点数字面量
 - 布尔字面量
 - `nil`
+- 常量表达式（字面量、具名常量、`iota`、`time.Hour` 等包常量、常量运算）按 Go 推定的类型折叠成字面量，例如 `var x int32 = 5` 生成 `int32` 字面量
 - 一元 `!`
-- 一元 `-`、`+`、`^`
+- 一元 `-`（零值取自操作数类型）、`+`、`^`
 - 指针解引用 `*ptr`
-- 二元 `+`、`-`、`*`、`/`
+- 二元 `+`、`-`、`*`、`/`、`%`（整数溢出按位宽回绕，除法向零截断，同 Go）
 - 比较运算 `>`、`>=`、`<`、`<=`、`==`、`!=`
 - 布尔运算 `&&`、`||`
 - 括号表达式
@@ -140,10 +136,17 @@
 - receiver 方法值：`receiver.Method` 生成 `method`。
 - 函数字面量作为值。
 - 函数变量调用：`fn(args...)`。
-- 函数风格的 `int64(expr)` 转换。
+- 不改变 WLang 表示的转换原样传值：`int`↔`int64`、`time.Duration`↔`int64`、具名字符串类型↔`string`、转成接口类型。其余转换（`float64(n)`、`int(f)`、`string(b)`、`[]byte(s)` 等）翻译期拒绝。
 
-当前范围外：
+翻译期拒绝：
 
+- string 的下标与切片 `s[i]`、`s[a:b]`。
+- 完整切片表达式 `xs[a:b:c]`。
+- 计算值上的字段访问与赋值：`xs[i].F`、`f().F`、`x.(T).F`（先赋给局部变量）。
+- descriptor 结构体的提升字段（嵌入字段本身在 descriptor 里已被拒绝）。
+- 移位与位运算 `<<`、`>>`、`&`、`|`、`^`、`&^`（常量运算除外）。
+- 表达式里的 `append`；只支持语句 `xs = append(xs, v...)`。
+- `new(T)`，当 `T` 是本包声明的结构体。
 - `&index` 和复杂取址表达式。
 - 泛型类型声明和泛型方法声明。
 - 反射结果的静态类型建模。
@@ -171,17 +174,17 @@
 - `close(ch)`
 - `panic(v)`
 - `int64(v)`
-- `len(xs)` 生成 `arr.len(xs)`
-- `append(xs, v)` 在 `xs = append(xs, v)` 中生成 `arr.push(xs, v)`
+- `len(xs)` 生成 `arr.len(xs)`；map 生成 `map.len`，string 返回字节数
+- `append(xs, v...)` 在 `xs = append(xs, v...)` 中生成 `arr.push(xs, v)`；`append(xs, ys...)` 逐个追加
 - `delete(dict, k)` 生成 `map.del(dict, k)`
-- `cap(ch)` 生成 `ch.cap(ch)`，`cap(xs)` 生成 `arr.len(xs)`
+- `cap(ch)` 生成 `ch.cap(ch)`，`cap(xs)` 生成 `arr.cap(xs)`
 - `new(T)` 生成 `ptr.new("T")`
 - `copy(dst, src)` 生成 `copy(dst, src)`
 - `complex`、`real`、`imag` 生成同名内建调用
 
-当前范围外：
+翻译期拒绝：
 
-- 可变参数展开：`fn(xs...)`。
+- 可变参数展开：`fn(xs...)`（`append(xs, ys...)` 除外）。
 
 ## 复合字面量
 
@@ -193,6 +196,7 @@
 - 包限定结构体字面量：`api.Args{Name: "aaa"}`。
 - 当前包结构体字面量：`Args{Name: "aaa"}`。
 - 无键结构体字面量：`Args{"aaa"}`，字段名来自 Go 类型信息。
+- 省略类型的元素字面量：`[]Point{{X: 1}}`、`map[string]Point{"a": {X: 1}}`，类型来自 Go 类型信息。
 - 当前包结构体字面量作为调用参数：`a.Book(ctx, Args{Name: "aaa"})`。
 - 使用 `Options.LocalPackageName` 控制当前包结构体字面量的生成类型前缀。
 
@@ -279,6 +283,17 @@ type Result struct {
 - 单个 JSON 文档需要包含依赖元数据时，使用 `EmbedImportMap`。
 - 使用 CLI `-manifest` 将依赖元数据写入单独文件。
 - 使用 CLI `-embed-import-map` 将依赖元数据包含在 JSON 输出中。
+
+## 与 Go 的语义一致性
+
+`go2wlang/differential_test.go` 对 `go2wlang/testdata/differential/cases.go` 里的每个函数做差分测试：原生运行 Go 函数，再翻译成 WLang 在解释器里运行，比较 JSON 规范化后的结果（失败只比较是否失败）；标注为拒绝的用例要求翻译期诊断带上写法名称与源码位置。新增翻译能力时同时在该文件里加用例。
+
+运行期语义与 Go 一致的要点：
+
+- 结构体（record）是值：赋值、传参、存入容器时复制。
+- 切片共享底层数组：`ys := xs` 与 `xs[a:b]` 之后的元素写入互相可见，`append` 在容量足够时复用底层数组。
+- `var xs []T`、`var m map[K]V` 是 nil，JSON 编码为 `null`；写 nil map 是运行时错误。
+- map 遍历按 key 升序（Go 不规定顺序，确定的顺序是重放所需）。
 
 ## 诊断
 

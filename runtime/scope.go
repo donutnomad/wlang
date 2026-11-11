@@ -125,8 +125,9 @@ func (s *Scope) PopDeferred() []deferredCall {
 func (s *Scope) Pop() *Scope { return s.parent }
 
 // Let defines a new variable in the current scope (always writable locally).
+// A record value is copied: every binding owns its struct value as in Go.
 func (s *Scope) Let(name string, v types.Value, declaredType string) {
-	s.vars[name] = &varBinding{val: v, writable: true, declaredType: declaredType}
+	s.vars[name] = &varBinding{val: types.CopyValue(v), writable: true, declaredType: declaredType}
 }
 
 // LetReadOnly defines a read-only variable (used for top-level injection).
@@ -220,7 +221,7 @@ func (s *Scope) Set(name string, v types.Value) error {
 					"variable %q declared as %s, got %s",
 					name, b.declaredType, v.TypeName())
 			}
-			b.val = v
+			b.val = types.CopyValue(v)
 			return nil
 		}
 	}
@@ -286,7 +287,7 @@ func setRecordPath(validator valueValidator, record *types.Record, segs []string
 				return err
 			}
 		}
-		if !record.SetField(segs[0], value) {
+		if !record.SetField(segs[0], types.CopyValue(value)) {
 			return werr.Newf(werr.CodeSymbol, "record field %q not found", segs[0])
 		}
 		return nil

@@ -650,6 +650,10 @@ func (r *Registry) encodeCarrierByID(id string, carrier any, path string) (any, 
 		if value.Kind() != reflect.Slice && value.Kind() != reflect.Array {
 			return nil, codecError(path, "encode %s: expected array carrier, got %T", descriptor.LanguageName, carrier)
 		}
+		if value.Kind() == reflect.Slice && value.IsNil() {
+			// A nil slice encodes as null, as encoding/json does.
+			return nil, nil
+		}
 		if descriptor.Kind == types.TypeKindArray && int64(value.Len()) != descriptor.Length {
 			return nil, codecError(path, "encode %s: array length %d, want %d", descriptor.LanguageName, value.Len(), descriptor.Length)
 		}
@@ -673,6 +677,9 @@ func (r *Registry) encodeCarrierByID(id string, carrier any, path string) (any, 
 		value := reflect.ValueOf(carrier)
 		if value.Kind() != reflect.Map {
 			return nil, codecError(path, "encode %s: expected map carrier, got %T", descriptor.LanguageName, carrier)
+		}
+		if value.IsNil() {
+			return nil, nil
 		}
 		out := make(map[string]any, value.Len())
 		iter := value.MapRange()

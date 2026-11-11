@@ -217,6 +217,117 @@ type translator struct {
 	packagePath      string
 	namedResults     []resultSpec
 	descriptorNames  map[string]bool
+	// temps numbers the hidden variables the translation introduces.
+	temps int
+	// targets is the stack of statements break/continue can address inside
+	// the function being translated; pendingLabel is the label of the
+	// labelled statement about to be translated.
+	targets      []*branchTarget
+	pendingLabel string
+}
+
+// branchTarget is an enclosing loop, switch or select. A switch or select
+// that a break addresses is wrapped in a single-iteration labelled loop, and
+// a continue that has to cross it names its loop explicitly.
+type branchTarget struct {
+	loop  bool
+	label string
+	name  string
+	used  bool
+}
+
+func (t *translator) tempName() string {
+	t.temps++
+	return fmt.Sprintf("__wlang_tmp_%d", t.temps)
+}
+
+// pushTarget opens a break/continue target, taking the pending label.
+func (t *translator) pushTarget(loop bool) *branchTarget {
+	target := &branchTarget{loop: loop, label: t.pendingLabel}
+	t.pendingLabel = ""
+	t.targets = append(t.targets, target)
+	return target
+}
+
+func (t *translator) popTarget() {
+	t.targets = t.targets[:len(t.targets)-1]
+}
+
+// targetName is the label emitted for a target that a break or continue
+// addresses by name.
+func (t *translator) targetName(target *branchTarget) string {
+	target.used = true
+	if target.name == "" {
+		target.name = target.label
+		if target.name == "" {
+			t.temps++
+			target.name = fmt.Sprintf("__wlang_label_%d", t.temps)
+		}
+	}
+	return target.name
+}
+
+// labelLoop records the emitted label on a loop body map when a branch
+// statement addressed the loop by name.
+func labelLoop(loop map[string]any, target *branchTarget) {
+	if target.used {
+		loop["label"] = target.name
+	}
+}
+
+// branchStmt resolves break/continue against the enclosing targets.
+func (t *translator) branchStmt(x *ast.BranchStmt) ([]any, error) {
+	switch x.Tok {
+	case token.GOTO:
+		return nil, t.unsupported(x, "goto is not supported", "use a loop with break or continue")
+	case token.FALLTHROUGH:
+		return nil, t.unsupported(x, "fallthrough is not supported", "list the values in one case or repeat the statements")
+	}
+	keyword := "break"
+	if x.Tok == token.CONTINUE {
+		keyword = "continue"
+	}
+	index := -1
+	for i := len(t.targets) - 1; i >= 0; i-- {
+		target := t.targets[i]
+		if x.Label != nil {
+			if target.label == x.Label.Name {
+				index = i
+				break
+			}
+			continue
+		}
+		if target.loop || x.Tok == token.BREAK {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return nil, t.unsupported(x, keyword+" has no enclosing target", "")
+	}
+	target := t.targets[index]
+	if x.Tok == token.CONTINUE && !target.loop {
+		return nil, t.unsupported(x, "continue must name a loop", "")
+	}
+	if index == len(t.targets)-1 && target.loop {
+		return []any{map[string]any{keyword: true}}, nil
+	}
+	return []any{map[string]any{keyword: t.targetName(target)}}, nil
+}
+
+// wrapBreakable wraps a switch or select that a break addressed in a
+// single-iteration loop carrying the break's label.
+func wrapBreakable(body []any, target *branchTarget) []any {
+	if !target.used {
+		return body
+	}
+	return []any{map[string]any{"fori": map[string]any{
+		"var":   "",
+		"from":  lit("int64", "0"),
+		"to":    lit("int64", "1"),
+		"label": target.name,
+		"do":    body,
+	}}}
 }
 
 type translationUnit struct {
@@ -451,6 +562,10 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 	switch x := s.(type) {
 	case *ast.DeclStmt:
 		decl, ok := x.Decl.(*ast.GenDecl)
+		if ok && decl.Tok == token.CONST && t.info != nil {
+			// Constant uses are folded to literals; the declaration emits nothing.
+			return nil, nil
+		}
 		if !ok || decl.Tok != token.VAR {
 			return nil, t.unsupported(s, "only var declarations are supported", "move declarations into simple var statements")
 		}
@@ -484,23 +599,17 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 		}
 		return []any{map[string]any{"return": ex}}, nil
 	case *ast.IfStmt:
-		return t.ifStmt(x)
+		return t.scopeInit(x.Init, func() ([]any, error) { return t.ifStmt(x) })
 	case *ast.SwitchStmt:
-		return t.switchStmt(x)
+		return t.scopeInit(x.Init, func() ([]any, error) { return t.switchStmt(x) })
 	case *ast.TypeSwitchStmt:
-		return t.typeSwitchStmt(x)
+		return t.scopeInit(x.Init, func() ([]any, error) { return t.typeSwitchStmt(x) })
 	case *ast.RangeStmt:
 		return t.rangeStmt(x)
 	case *ast.ForStmt:
 		return t.forStmt(x)
 	case *ast.BranchStmt:
-		switch x.Tok {
-		case token.BREAK:
-			return []any{map[string]any{"break": true}}, nil
-		case token.CONTINUE:
-			return []any{map[string]any{"continue": true}}, nil
-		}
-		return nil, t.unsupported(s, "branch statement is not supported", "use break or continue")
+		return t.branchStmt(x)
 	case *ast.ExprStmt:
 		if call, ok := x.X.(*ast.CallExpr); ok {
 			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "panic" {
@@ -546,9 +655,13 @@ func (t *translator) stmt(s ast.Stmt) ([]any, error) {
 		}
 		return body, nil
 	case *ast.LabeledStmt:
+		switch x.Stmt.(type) {
+		case *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+			t.pendingLabel = x.Label.Name
+		}
 		return t.stmt(x.Stmt)
 	case *ast.IncDecStmt:
-		return nil, t.unsupported(s, "standalone inc/dec is only supported as for post", "use x = x + 1")
+		return t.incDec(x)
 	default:
 		return nil, t.unsupported(s, "statement is not supported", "keep this code in a Go host function")
 	}
@@ -632,6 +745,8 @@ func (t *translator) ifStmt(x *ast.IfStmt) ([]any, error) {
 
 func (t *translator) switchStmt(x *ast.SwitchStmt) ([]any, error) {
 	var out []any
+	target := t.pushTarget(false)
+	defer t.popTarget()
 	if err := t.locals.withFrame(func() error {
 		if x.Init != nil {
 			items, err := t.stmt(x.Init)
@@ -647,17 +762,32 @@ func (t *translator) switchStmt(x *ast.SwitchStmt) ([]any, error) {
 			if err != nil {
 				return err
 			}
+			// The tag is evaluated once, before the cases.
+			if _, isIdent := x.Tag.(*ast.Ident); !isIdent && !t.isConstant(x.Tag) {
+				name := t.tempName()
+				out = append(out, map[string]any{"let": map[string]any{name: tag}})
+				tag = varNode(name)
+			}
 		}
 		chain, err := t.switchCaseChain(x.Body.List, tag)
 		if err != nil {
 			return err
 		}
-		out = append(out, chain...)
+		out = append(out, wrapBreakable(chain, target)...)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// isConstant reports whether e is a compile-time constant.
+func (t *translator) isConstant(e ast.Expr) bool {
+	if t.info == nil {
+		return false
+	}
+	tv, ok := t.info.Types[e]
+	return ok && tv.Value != nil
 }
 
 func (t *translator) switchCaseChain(stmts []ast.Stmt, tag any) ([]any, error) {
@@ -729,6 +859,8 @@ func (t *translator) caseCond(tag any, exprs []ast.Expr) (any, error) {
 
 func (t *translator) typeSwitchStmt(x *ast.TypeSwitchStmt) ([]any, error) {
 	var out []any
+	target := t.pushTarget(false)
+	defer t.popTarget()
 	if err := t.locals.withFrame(func() error {
 		if x.Init != nil {
 			items, err := t.stmt(x.Init)
@@ -741,11 +873,16 @@ func (t *translator) typeSwitchStmt(x *ast.TypeSwitchStmt) ([]any, error) {
 		if err != nil {
 			return err
 		}
+		if node, ok := subject.(map[string]any); !ok || node["var"] == nil {
+			name := t.tempName()
+			out = append(out, map[string]any{"let": map[string]any{name: subject}})
+			subject = varNode(name)
+		}
 		chain, err := t.typeSwitchCaseChain(x.Body.List, subject, bindName)
 		if err != nil {
 			return err
 		}
-		out = append(out, chain...)
+		out = append(out, wrapBreakable(chain, target)...)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -871,10 +1008,18 @@ func typesNullName() string {
 func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 	if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
 		if idx, ok := x.Lhs[0].(*ast.IndexExpr); ok {
-			return t.indexAssign(idx, x.Tok, x.Rhs[0])
+			val, err := t.expr(x.Rhs[0])
+			if err != nil {
+				return nil, err
+			}
+			return t.indexAssignValue(idx, x.Tok, val)
 		}
 		if sel, ok := x.Lhs[0].(*ast.SelectorExpr); ok {
-			return t.pathAssign(selectorPath(sel), x.Tok, x.Rhs[0], sel)
+			path, err := t.assignablePath(sel)
+			if err != nil {
+				return nil, err
+			}
+			return t.pathAssign(path, x.Tok, x.Rhs[0], sel)
 		}
 		id, ok := x.Lhs[0].(*ast.Ident)
 		if !ok {
@@ -931,29 +1076,10 @@ func (t *translator) assign(x *ast.AssignStmt) ([]any, error) {
 		}
 		return t.tupleAssign(x, nil)
 	}
-	return nil, t.unsupported(x, "multi-value assignment requires one RHS expression", "use a host call returning a tuple")
-}
-
-func (t *translator) tupleAssign(x *ast.AssignStmt, rhs any) ([]any, error) {
-	names := []any{}
-	for _, lhs := range x.Lhs {
-		id, ok := lhs.(*ast.Ident)
-		if !ok {
-			return nil, t.unsupported(lhs, "tuple assignment targets must be identifiers", "")
-		}
-		names = append(names, id.Name)
-		if x.Tok == token.DEFINE {
-			t.locals.add(id.Name)
-		}
+	if len(x.Lhs) == len(x.Rhs) {
+		return t.multiAssign(x)
 	}
-	var err error
-	if rhs == nil {
-		rhs, err = t.expr(x.Rhs[0])
-		if err != nil {
-			return nil, err
-		}
-	}
-	return []any{map[string]any{"let": []any{names, rhs}}}, nil
+	return nil, t.unsupported(x, "assignment count mismatch", "")
 }
 
 func (t *translator) pathAssign(name string, tok token.Token, rhs ast.Expr, src ast.Node) ([]any, error) {
@@ -974,16 +1100,15 @@ func (t *translator) pathAssign(name string, tok token.Token, rhs ast.Expr, src 
 	return nil, t.unsupported(src, "assignment operator is not supported", "use = or a compound arithmetic assignment")
 }
 
-func (t *translator) indexAssign(idx *ast.IndexExpr, tok token.Token, rhs ast.Expr) ([]any, error) {
+func (t *translator) indexAssignValue(idx *ast.IndexExpr, tok token.Token, val any) ([]any, error) {
+	if _, ok := idx.X.(*ast.Ident); !ok {
+		return nil, t.unsupported(idx, "assignment to an element of a computed value is not supported", "assign through a local variable")
+	}
 	target, err := t.expr(idx.X)
 	if err != nil {
 		return nil, err
 	}
 	key, err := t.expr(idx.Index)
-	if err != nil {
-		return nil, err
-	}
-	val, err := t.expr(rhs)
 	if err != nil {
 		return nil, err
 	}
@@ -1011,6 +1136,23 @@ func (t *translator) appendStatements(target string, call *ast.CallExpr) ([]any,
 	base, ok := call.Args[0].(*ast.Ident)
 	if !ok || base.Name != target {
 		return nil, t.unsupported(call.Args[0], "append target must match assignment target", "")
+	}
+	if call.Ellipsis.IsValid() {
+		// xs = append(xs, ys...): ys is evaluated once, then pushed element
+		// by element.
+		items, err := t.expr(call.Args[1])
+		if err != nil {
+			return nil, err
+		}
+		source, item := t.tempName(), t.tempName()
+		return []any{
+			map[string]any{"let": map[string]any{source: items}},
+			map[string]any{"foreach": map[string]any{
+				"target": varNode(source),
+				"as":     item,
+				"do":     []any{map[string]any{"expr": map[string]any{"arr.push": []any{varNode(target), varNode(item)}}}},
+			}},
+		}, nil
 	}
 	out := make([]any, 0, len(call.Args)-1)
 	for _, raw := range call.Args[1:] {
@@ -1050,42 +1192,158 @@ func (t *translator) elseBody(s ast.Stmt) ([]any, error) {
 }
 
 func (t *translator) rangeStmt(x *ast.RangeStmt) ([]any, error) {
+	if x.Tok == token.ASSIGN {
+		return nil, t.unsupported(x, "range with = is not supported", "declare the iteration variables with :=")
+	}
+	key, value := rangeVarName(x.Key), rangeVarName(x.Value)
+	switch kind := t.rangeKind(x.X); kind {
+	case "int":
+		return t.rangeInt(x, key)
+	case "map":
+		return t.rangeMap(x, key, value)
+	case "slice", "":
+	default:
+		return nil, t.unsupported(x.X, "range over "+kind+" is not supported", "range over a slice")
+	}
 	target, err := t.expr(x.X)
 	if err != nil {
 		return nil, err
 	}
 	as := "_"
-	idx := ""
-	if id, ok := x.Value.(*ast.Ident); ok && id.Name != "_" {
-		as = id.Name
+	if value != "" {
+		as = value
 	}
-	if id, ok := x.Key.(*ast.Ident); ok && id.Name != "_" {
-		idx = id.Name
+	loop := map[string]any{"target": target, "as": as}
+	if key != "" {
+		loop["index"] = key
 	}
-	if as == "_" && idx != "" {
-		as = idx
-		idx = ""
-	}
-	var body []any
-	if err := t.locals.withFrame(func() error {
-		t.locals.add(as)
-		t.locals.add(idx)
-		var err error
-		body, err = t.stmtList(x.Body.List)
-		return err
-	}); err != nil {
+	if err := t.loopBody(x.Body, loop, key, value); err != nil {
 		return nil, err
-	}
-	loop := map[string]any{"target": target, "as": as, "do": body}
-	if idx != "" {
-		loop["index"] = idx
 	}
 	return []any{map[string]any{"foreach": loop}}, nil
 }
 
+func rangeVarName(e ast.Expr) string {
+	if id, ok := e.(*ast.Ident); ok && id.Name != "_" {
+		return id.Name
+	}
+	return ""
+}
+
+// rangeKind classifies the range expression by its Go type; "" means the
+// type is unknown and the expression is treated as a slice.
+func (t *translator) rangeKind(e ast.Expr) string {
+	if t.info == nil {
+		return ""
+	}
+	typ := t.info.TypeOf(e)
+	if typ == nil {
+		return ""
+	}
+	switch u := typ.Underlying().(type) {
+	case *gotypes.Slice, *gotypes.Array:
+		return "slice"
+	case *gotypes.Map:
+		return "map"
+	case *gotypes.Chan:
+		return "channel"
+	case *gotypes.Signature:
+		return "function"
+	case *gotypes.Pointer:
+		return "pointer"
+	case *gotypes.Basic:
+		switch {
+		case u.Info()&gotypes.IsString != 0:
+			return "string"
+		case u.Info()&gotypes.IsInteger != 0:
+			if basicLiteralType(u) != "int64" {
+				return "integer type " + u.Name()
+			}
+			return "int"
+		}
+	}
+	return typ.String()
+}
+
+// loopBody translates a loop body into loop["do"] (after any prefix already
+// there) with the loop as the innermost break/continue target.
+func (t *translator) loopBody(body *ast.BlockStmt, loop map[string]any, vars ...string) error {
+	target := t.pushTarget(true)
+	defer t.popTarget()
+	var out []any
+	if err := t.locals.withFrame(func() error {
+		for _, name := range vars {
+			t.locals.add(name)
+		}
+		var err error
+		out, err = t.stmtList(body.List)
+		return err
+	}); err != nil {
+		return err
+	}
+	if prefix, ok := loop["do"].([]any); ok {
+		out = append(prefix, out...)
+	}
+	loop["do"] = out
+	labelLoop(loop, target)
+	return nil
+}
+
+// rangeInt is Go's for i := range n: n is evaluated once and each iteration
+// gets the next index regardless of writes to i in the body.
+func (t *translator) rangeInt(x *ast.RangeStmt, key string) ([]any, error) {
+	to, err := t.expr(x.X)
+	if err != nil {
+		return nil, err
+	}
+	loop := map[string]any{"var": key, "from": lit("int64", "0"), "to": to}
+	if err := t.loopBody(x.Body, loop, key); err != nil {
+		return nil, err
+	}
+	return []any{map[string]any{"fori": loop}}, nil
+}
+
+// rangeMap visits the keys in ascending order (map.keys is sorted), a
+// deterministic order among those Go's unspecified map iteration permits.
+// Like Go, a key deleted before it is reached is skipped.
+func (t *translator) rangeMap(x *ast.RangeStmt, key, value string) ([]any, error) {
+	target, err := t.expr(x.X)
+	if err != nil {
+		return nil, err
+	}
+	mapName := t.tempName()
+	if key == "" {
+		key = t.tempName()
+	}
+	prefix := []any{map[string]any{"if": map[string]any{
+		"cond": map[string]any{"!": []any{map[string]any{"map.has": []any{varNode(mapName), varNode(key)}}}},
+		"then": []any{map[string]any{"continue": true}},
+	}}}
+	if value != "" {
+		prefix = append(prefix, map[string]any{"let": map[string]any{
+			value: map[string]any{"map.value": []any{varNode(mapName), varNode(key)}},
+		}})
+	}
+	loop := map[string]any{
+		"target": map[string]any{"map.keys": []any{varNode(mapName)}},
+		"as":     key,
+		"do":     prefix,
+	}
+	if err := t.loopBody(x.Body, loop, key, value); err != nil {
+		return nil, err
+	}
+	return []any{
+		map[string]any{"let": map[string]any{mapName: target}},
+		map[string]any{"foreach": loop},
+	}, nil
+}
+
+// forStmt translates Go's three-clause loop: the condition is evaluated
+// before every iteration and the post statement after it, and body writes to
+// the loop variable carry into the next iteration.
 func (t *translator) forStmt(x *ast.ForStmt) ([]any, error) {
-	if x.Init == nil || x.Cond == nil || x.Post == nil {
-		return nil, t.unsupported(x, "for requires init, condition, and post", "use a simple counted for loop")
+	if x.Init == nil || x.Cond == nil {
+		return nil, t.unsupported(x, "for requires an init statement and a condition", "write for i := from; cond; post")
 	}
 	init, ok := x.Init.(*ast.AssignStmt)
 	if !ok || len(init.Lhs) != 1 || len(init.Rhs) != 1 || init.Tok != token.DEFINE {
@@ -1099,77 +1357,27 @@ func (t *translator) forStmt(x *ast.ForStmt) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	cond, ok := x.Cond.(*ast.BinaryExpr)
-	if !ok || (cond.Op != token.LSS && cond.Op != token.GEQ) {
-		return nil, t.unsupported(x.Cond, "for condition must be i < to or i >= to", "")
-	}
-	left, ok := cond.X.(*ast.Ident)
-	if !ok || left.Name != id.Name {
-		return nil, t.unsupported(x.Cond, "for condition must use loop variable", "")
-	}
-	to, err := t.expr(cond.Y)
-	if err != nil {
-		return nil, err
-	}
-	if cond.Op == token.GEQ {
-		to = map[string]any{"-": []any{to, lit("int64", "1")}}
-	}
-	step, err := t.forStep(x.Post, id.Name)
-	if err != nil {
-		return nil, err
-	}
-	var body []any
-	if err := t.locals.withFrame(func() error {
+	loop := map[string]any{"var": id.Name, "from": from}
+	err = t.locals.withFrame(func() error {
 		t.locals.add(id.Name)
-		var err error
-		body, err = t.stmtList(x.Body.List)
-		return err
-	}); err != nil {
+		cond, err := t.expr(x.Cond)
+		if err != nil {
+			return err
+		}
+		loop["cond"] = cond
+		post := []any{}
+		if x.Post != nil {
+			if post, err = t.stmt(x.Post); err != nil {
+				return err
+			}
+		}
+		loop["post"] = post
+		return t.loopBody(x.Body, loop, id.Name)
+	})
+	if err != nil {
 		return nil, err
 	}
-	return []any{map[string]any{"fori": map[string]any{
-		"var":  id.Name,
-		"from": from,
-		"to":   to,
-		"step": step,
-		"do":   body,
-	}}}, nil
-}
-
-func (t *translator) forStep(post ast.Stmt, name string) (any, error) {
-	switch p := post.(type) {
-	case *ast.IncDecStmt:
-		id, ok := p.X.(*ast.Ident)
-		if !ok || id.Name != name {
-			return nil, t.unsupported(post, "for post must use loop variable", "")
-		}
-		switch p.Tok {
-		case token.INC:
-			return lit("int64", "1"), nil
-		case token.DEC:
-			return lit("int64", "-1"), nil
-		default:
-			return nil, t.unsupported(post, "for post must be i++ or i--", "")
-		}
-	case *ast.AssignStmt:
-		if len(p.Lhs) != 1 || len(p.Rhs) != 1 || (p.Tok != token.ADD_ASSIGN && p.Tok != token.SUB_ASSIGN) {
-			return nil, t.unsupported(post, "for post must be i += step or i -= step", "")
-		}
-		id, ok := p.Lhs[0].(*ast.Ident)
-		if !ok || id.Name != name {
-			return nil, t.unsupported(post, "for post must update loop variable", "")
-		}
-		step, err := t.expr(p.Rhs[0])
-		if err != nil {
-			return nil, err
-		}
-		if p.Tok == token.SUB_ASSIGN {
-			return map[string]any{"-": []any{lit("int64", "0"), step}}, nil
-		}
-		return step, nil
-	default:
-		return nil, t.unsupported(post, "for post must be i++/i-- or compound step", "")
-	}
+	return []any{map[string]any{"fori": loop}}, nil
 }
 
 func (t *translator) goStmt(x *ast.GoStmt) ([]any, error) {
@@ -1221,6 +1429,8 @@ func funcLitParamNames(fun *ast.FuncLit) []string {
 }
 
 func (t *translator) selectStmt(x *ast.SelectStmt) ([]any, error) {
+	target := t.pushTarget(false)
+	defer t.popTarget()
 	cases := []any{}
 	for _, stmt := range x.Body.List {
 		cc, ok := stmt.(*ast.CommClause)
@@ -1303,10 +1513,13 @@ func (t *translator) selectStmt(x *ast.SelectStmt) ([]any, error) {
 		inner["do"] = do
 		cases = append(cases, map[string]any{"case": inner})
 	}
-	return []any{map[string]any{"select": cases}}, nil
+	return wrapBreakable([]any{map[string]any{"select": cases}}, target), nil
 }
 
 func (t *translator) expr(e ast.Expr) (any, error) {
+	if folded, ok, err := t.constantLiteral(e); ok || err != nil {
+		return folded, err
+	}
 	switch x := e.(type) {
 	case *ast.BasicLit:
 		return t.basicLit(x)
@@ -1338,11 +1551,17 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 			}
 			return methodNode(recv, x.Sel.Name), nil
 		}
+		if _, ok := selectorRootIdent(x.X); !ok {
+			return nil, t.unsupported(x, "field access on a computed value is not supported", "assign the value to a local variable first, then read the field")
+		}
+		if t.isPromotedField(x) {
+			return nil, t.unsupported(x, "promoted field "+x.Sel.Name+" of an embedded struct is not supported", "name the embedded field explicitly")
+		}
 		return varNode(selectorPath(x)), nil
 	case *ast.BinaryExpr:
 		op, ok := binaryOp(x.Op)
 		if !ok {
-			return nil, t.unsupported(x, "binary operator is not supported", "")
+			return nil, t.unsupported(x, "operator "+x.Op.String()+" is not supported", "")
 		}
 		l, err := t.expr(x.X)
 		if err != nil {
@@ -1365,7 +1584,7 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"-": []any{lit("int64", "0"), v}}, nil
+			return map[string]any{"-": []any{t.typedZero(x.X), v}}, nil
 		}
 		if x.Op == token.XOR {
 			v, err := t.expr(x.X)
@@ -1411,6 +1630,9 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 		}
 		return map[string]any{"ptr.deref": []any{v}}, nil
 	case *ast.IndexExpr:
+		if t.scalarType(x.X) == "string" {
+			return nil, t.unsupported(x, "indexing a string is not supported", "do byte and rune handling in an activity or host function")
+		}
 		target, err := t.expr(x.X)
 		if err != nil {
 			return nil, err
@@ -1424,6 +1646,12 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 		}
 		return map[string]any{"arr.get": []any{target, idx}}, nil
 	case *ast.SliceExpr:
+		if t.scalarType(x.X) == "string" {
+			return nil, t.unsupported(x, "slicing a string is not supported", "do substring handling in an activity or host function")
+		}
+		if x.Slice3 {
+			return nil, t.unsupported(x, "full slice expression xs[a:b:c] is not supported", "use xs[a:b]")
+		}
 		target, err := t.expr(x.X)
 		if err != nil {
 			return nil, err
@@ -1473,8 +1701,21 @@ func (t *translator) basicLit(x *ast.BasicLit) (any, error) {
 }
 
 func (t *translator) callExpr(x *ast.CallExpr) (any, error) {
+	if t.info != nil {
+		if tv, ok := t.info.Types[x.Fun]; ok && tv.IsType() {
+			return t.conversion(x, tv.Type)
+		}
+	}
+	if x.Ellipsis.IsValid() {
+		return nil, t.unsupported(x, "variadic argument spread f(xs...) is not supported", "pass the slice as one parameter")
+	}
 	fun := t.stripCallTypeArgs(x.Fun)
 	if id, ok := fun.(*ast.Ident); ok {
+		if t.info != nil {
+			if builtin, isBuiltin := t.info.Uses[id].(*gotypes.Builtin); isBuiltin && !supportedBuiltins[builtin.Name()] {
+				return nil, t.unsupported(x, "builtin "+builtin.Name()+" is not supported", "")
+			}
+		}
 		switch id.Name {
 		case "int64":
 			if len(x.Args) != 1 {
@@ -1507,7 +1748,7 @@ func (t *translator) callExpr(x *ast.CallExpr) (any, error) {
 			if t.isChanExpr(x.Args[0]) {
 				return map[string]any{"ch.cap": []any{arg}}, nil
 			}
-			return map[string]any{"arr.len": []any{arg}}, nil
+			return map[string]any{"arr.cap": []any{arg}}, nil
 		case "new":
 			if len(x.Args) != 1 {
 				return nil, t.unsupported(x, "new requires one type argument", "")
@@ -1515,6 +1756,9 @@ func (t *translator) callExpr(x *ast.CallExpr) (any, error) {
 			typ := t.typeName(x.Args[0])
 			if typ == "" {
 				return nil, t.unsupported(x.Args[0], "new type is not supported", "")
+			}
+			if t.isLocalStruct(x.Args[0]) {
+				return nil, t.unsupported(x, "new of a struct type declared in this package is not supported", "use a struct value")
 			}
 			return map[string]any{"ptr.new": []any{lit("string", typ)}}, nil
 		case "complex", "real", "imag":
@@ -1538,20 +1782,15 @@ func (t *translator) callExpr(x *ast.CallExpr) (any, error) {
 			if err != nil {
 				return nil, err
 			}
+			if t.isMapExpr(x.Args[0]) {
+				return map[string]any{"map.len": []any{arg}}, nil
+			}
+			if t.isChanExpr(x.Args[0]) {
+				return map[string]any{"ch.len": []any{arg}}, nil
+			}
 			return map[string]any{"arr.len": []any{arg}}, nil
 		case "append":
-			if len(x.Args) != 2 {
-				return nil, t.unsupported(x, "append expression supports exactly two arguments", "")
-			}
-			target, ok := x.Args[0].(*ast.Ident)
-			if !ok {
-				return nil, t.unsupported(x.Args[0], "append target must be an identifier", "")
-			}
-			item, err := t.expr(x.Args[1])
-			if err != nil {
-				return nil, err
-			}
-			return map[string]any{"arr.push": []any{varNode(target.Name), item}}, nil
+			return nil, t.unsupported(x, "append is only supported as the statement xs = append(xs, v...)", "assign the result back to the slice it extends")
 		default:
 			if t.locals.has(id.Name) {
 				return t.dynamicCall(varNode(id.Name), x.Args)
@@ -1796,6 +2035,9 @@ func (t *translator) hostCall(x *ast.CallExpr) (any, error) {
 }
 
 func (t *translator) compositeLit(x *ast.CompositeLit) (any, error) {
+	if x.Type == nil {
+		return t.elidedCompositeLit(x)
+	}
 	switch typ := x.Type.(type) {
 	case *ast.ArrayType:
 		elem := t.typeName(typ.Elt)
@@ -1864,6 +2106,23 @@ func (t *translator) compositeLit(x *ast.CompositeLit) (any, error) {
 	default:
 		return nil, t.unsupported(x.Type, "composite literal type is not supported", "")
 	}
+}
+
+// elidedCompositeLit translates an element literal whose type the enclosing
+// literal implies, such as the {X: 1} in []Point{{X: 1}}.
+func (t *translator) elidedCompositeLit(x *ast.CompositeLit) (any, error) {
+	var typ gotypes.Type
+	if t.info != nil {
+		typ = t.info.TypeOf(x)
+	}
+	if named, ok := typ.(*gotypes.Named); ok {
+		if _, isStruct := named.Underlying().(*gotypes.Struct); isStruct {
+			if name := t.languageTypeName(named); name != "" {
+				return t.structLiteral(x, name)
+			}
+		}
+	}
+	return nil, t.unsupported(x, "composite literal with an implied type is not supported here", "write the element type explicitly")
 }
 
 func (t *translator) structLiteral(x *ast.CompositeLit, typeName string) (any, error) {
@@ -2071,6 +2330,8 @@ func binaryOp(op token.Token) (string, bool) {
 		return "*", true
 	case token.QUO:
 		return "/", true
+	case token.REM:
+		return "%", true
 	case token.GTR:
 		return ">", true
 	case token.GEQ:
@@ -2101,6 +2362,8 @@ func compoundOp(op token.Token) (string, bool) {
 		return "*", true
 	case token.QUO_ASSIGN:
 		return "/", true
+	case token.REM_ASSIGN:
+		return "%", true
 	}
 	return "", false
 }
@@ -2352,9 +2615,15 @@ func isPredeclaredTypeName(name string) bool {
 }
 
 func (t *translator) zeroLiteral(e ast.Expr) any {
+	if scalar := t.scalarType(e); scalar != "" {
+		// Named scalar types such as time.Duration are their underlying
+		// scalar in WLang.
+		e = ast.NewIdent(goScalarName(scalar))
+	}
 	typ := t.typeName(e)
 	if strings.HasPrefix(typ, "array<") && strings.HasSuffix(typ, ">") {
-		return map[string]any{"array": map[string]any{"elem": typ[6 : len(typ)-1], "items": []any{}}}
+		// A nil slice: length 0, encoded as JSON null like Go's.
+		return zeroNode(typ)
 	}
 	switch typ {
 	case "string":

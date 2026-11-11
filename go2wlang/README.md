@@ -168,13 +168,11 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 - `return`
 - 命名返回值函数，例如 `func Rule(...) (err error)`
 - `if cond { ... } else { ... }`
-- `for i := from; i < to; i++ { ... }`
-- `for i := from; i < to; i += step { ... }`
-- `for i := len(xs)-1; i >= 0; i-- { ... }`
-- `for i, item := range xs { ... }`
-- `for _, item := range xs { ... }`
-- `break`
-- `continue`
+- `for i := from; cond; post { ... }`：每轮求值 `cond`，循环体对 `i` 的写入带入下一轮
+- `for i := range xs`、`for i, item := range xs`、`for _, item := range xs`、`for range xs`
+- `for i := range n`、`for k, v := range m`（按 key 升序）
+- `break`、`continue`，包括带标签的形式；`switch` 内的 `break` 退出 `switch`
+- `x++`、`x--`、`a, b = b, a` 等多值赋值
 - `panic(expr)`
 - `defer pkg.Call(args...)` 和 `defer receiver.Call(args...)`
 - `defer func(){ ... }()`
@@ -188,7 +186,8 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 - 标识符和选择器路径
 - 字符串、布尔、整数、浮点数和 `nil` 字面量
 - 一元 `!`
-- 二元 `+`、`-`、`*`、`/`、比较运算、`&&`、`||`
+- 二元 `+`、`-`、`*`、`/`、`%`、比较运算、`&&`、`||`
+- 常量表达式（含 `iota`、`time.Hour`）按 Go 推定的类型折叠成字面量
 - 包调用，例如 `demo.Score(user, total)`
 - 当前包调用，例如 `BuildFailureReason(step, err)`
 - 接收者调用，例如 `svc.Run(input)`
@@ -208,8 +207,8 @@ go run ./cmd/go2wl -func Rule -embed-import-map ./rule.go
 - `close(ch)` 生成 `ch.close(ch)`
 - `panic(v)` 生成 wlang `panic` 语句
 - `make(chan T, n)` 生成 wlang channel 字面量
-- `len(xs)` 生成 `arr.len(xs)`
-- `xs = append(xs, v)` 生成 `arr.push(xs, v)`
+- `len(xs)` 生成 `arr.len(xs)`（map 生成 `map.len`）
+- `xs = append(xs, v...)` 生成 `arr.push(xs, v)`
 
 ## 映射规则
 
@@ -323,11 +322,14 @@ v1 当前范围外：
 - cgo
 - 泛型类型声明和泛型方法声明
 - `&index`、复杂取址和复杂别名写入
-- `switch` fallthrough 和带标签控制流
-- `goto`
-- `recover`
-- 含多个 init/post 语句的复杂 `for` 语句
-- 包级变量、`init` 和 `iota`
+- `switch` fallthrough、`goto`、`recover`
+- 省略 init 或 condition 的 `for`
+- range 遍历 string 或 channel
+- 改变值表示的类型转换（`float64(n)`、`int(f)`、`[]byte(s)`）、string 下标与切片、位运算与移位
+- 计算值上的字段访问（`xs[i].F`、`f().F`）
+- 包级变量和 `init`
 - 接收/发送左侧较复杂的 select case
+
+翻译结果与 Go 源码的行为一致；做不到一致的写法在翻译期报错。完整清单与差分测试见 [SUPPORT.md](SUPPORT.md)。
 
 推荐迁移模式：把当前范围外的行为保留在 Go 宿主函数中，并从生成的 wlang 程序调用这些宿主函数。

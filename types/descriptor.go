@@ -141,3 +141,19 @@ func (r *Record) SortedFieldNames() []string {
 	sort.Strings(names)
 	return names
 }
+
+// CopyValue gives a record Go value semantics: a non-pointer record is copied
+// together with every nested non-pointer record, while slices, maps and
+// pointers inside it stay shared, as when Go copies a struct. Other values are
+// returned unchanged.
+func CopyValue(value Value) Value {
+	record, ok := AsRecord(value)
+	if !ok || len(value.TypeName()) > 0 && value.TypeName()[0] == '*' {
+		return value
+	}
+	fields := make(map[string]Value, len(record.fields))
+	for name, field := range record.fields {
+		fields[name] = CopyValue(field)
+	}
+	return NewValue(value.TypeName(), &Record{typeName: record.typeName, fields: fields, aliases: record.aliases})
+}

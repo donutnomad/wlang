@@ -69,7 +69,9 @@ func (e *Executor) Eval(n ast.Node) (types.Value, error) {
 
 func (e *Executor) evalVar(v *ast.Var) (types.Value, error) {
 	if got, ok := e.scope.LookupPath(v.Name); ok {
-		return got, nil
+		// Reading a struct yields a copy, so storing it anywhere else (a
+		// container, a field, an argument) cannot alias the variable.
+		return types.CopyValue(got), nil
 	}
 	if v.Default != nil {
 		return e.Eval(v.Default)
@@ -437,6 +439,7 @@ func init() {
 		"-":              arithmeticOp("-"),
 		"*":              arithmeticOp("*"),
 		"/":              arithmeticOp("/"),
+		"%":              arithmeticOp("%"),
 		">":              compareOp(">"),
 		">=":             compareOp(">="),
 		"<":              compareOp("<"),
@@ -455,6 +458,7 @@ func init() {
 		"arr.set":        arraySet,
 		"arr.slice":      arraySlice,
 		"arr.len":        arrayLen,
+		"arr.cap":        arrayCap,
 		"map.get":        mapGet,
 		"map.value":      mapValue,
 		"map.set":        mapSet,
@@ -630,6 +634,11 @@ func numI8(op string, a, b int8) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad int8 op %q", op)
 	}
@@ -649,6 +658,11 @@ func numI16(op string, a, b int16) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad int16 op %q", op)
 	}
@@ -668,6 +682,11 @@ func numI32(op string, a, b int32) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad int32 op %q", op)
 	}
@@ -687,6 +706,11 @@ func numI64(op string, a, b int64) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad int64 op %q", op)
 	}
@@ -706,6 +730,11 @@ func numU8(op string, a, b uint8) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad uint8 op %q", op)
 	}
@@ -725,6 +754,11 @@ func numU16(op string, a, b uint16) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad uint16 op %q", op)
 	}
@@ -744,6 +778,11 @@ func numU32(op string, a, b uint32) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad uint32 op %q", op)
 	}
@@ -763,6 +802,11 @@ func numU64(op string, a, b uint64) (types.Value, error) {
 			return types.Value{}, werr.New(werr.CodeRuntime, "division by zero")
 		}
 		r = a / b
+	case "%":
+		if b == 0 {
+			return types.Value{}, werr.New(werr.CodeRuntime, "integer divide by zero")
+		}
+		r = a % b
 	default:
 		return types.Value{}, werr.Newf(werr.CodeType, "bad uint64 op %q", op)
 	}

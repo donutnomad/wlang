@@ -154,6 +154,12 @@ func (t *typeChecker) walk(n ast.Node) error {
 				return err
 			}
 		}
+		if err := t.walk(x.Cond); err != nil {
+			return err
+		}
+		if err := t.walkBlock(x.Post); err != nil {
+			return err
+		}
 		return t.walkBlock(x.Do)
 	case *ast.Match:
 		if err := t.walk(x.Value); err != nil {
