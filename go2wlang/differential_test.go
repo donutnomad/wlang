@@ -165,29 +165,88 @@ var differentialCases = []differentialCase{
 	{fn: differential.MinBuiltin, reject: "builtin min is not supported"},
 	{fn: differential.MinConstantFolded},
 	{fn: differential.FloatDivideByZero},
+
+	// Bound standard-library functions (stdlib/gostd.go).
+	{fn: differential.StringsCase},
+	{fn: differential.StringsPredicates},
+	{fn: differential.StringsIndexes},
+	{fn: differential.StringsSplitFields},
+	{fn: differential.StringsSplitIndexAndAppend},
+	{fn: differential.StringsAliasedImport},
+	{fn: differential.StringsRepeatNegative},
+	{fn: differential.StringsBuilder, reject: "type strings.Builder is not supported"},
+	{fn: differential.StringsTitle, reject: "strings.Title is not supported"},
+	{fn: differential.StringsFunctionValue, reject: "function value strings.ToUpper is not supported"},
+	{fn: differential.StrconvFormat},
+	{fn: differential.StrconvAtoi},
+	{fn: differential.StrconvParse},
+	{fn: differential.StrconvVarTuple},
+	{fn: differential.StrconvErrorFlow},
+	{fn: differential.StrconvQuote, reject: "strconv.Quote is not supported"},
+	{fn: differential.FmtSprintfScalars},
+	{fn: differential.FmtSprintAndLn},
+	{fn: differential.FmtErrorValues},
+	{fn: differential.FmtErrorfQuoteVerb, reject: "%q is not supported"},
+	{fn: differential.FmtErrorfWrapped},
+	{fn: differential.FmtQuoteVerb, reject: "%q is not supported"},
+	{fn: differential.FmtTypeVerb, reject: "%T is not supported"},
+	{fn: differential.FmtVerbMismatch, reject: "verb %d does not accept string operand"},
+	{fn: differential.FmtCountMismatch, reject: "format has 2 verbs for 1 operands"},
+	{fn: differential.FmtNonConstantFormat, reject: "format must be a constant string"},
+	{fn: differential.FmtStructOperand, reject: "fmt operand of type"},
+	{fn: differential.FmtStringerOperand, reject: "the type has methods"},
+	{fn: differential.FmtStringerScalar, reject: "the type has methods"},
+	{fn: differential.FmtDurationOperand, reject: "the type has methods"},
+	{fn: differential.FmtSliceOperand, reject: "fmt operand of type []int is not supported"},
+	{fn: differential.FmtAnyOperand, reject: "fmt operand of type any is not supported"},
+	{fn: differential.FmtStarWidth, reject: "* width or precision is not supported"},
+	{fn: differential.FmtSprintfWrapVerb, reject: "does not take %w"},
+	{fn: differential.MathFunctions},
+	{fn: differential.MathSpecialValues},
+	{fn: differential.MathConstants},
+	{fn: differential.MathPow, reject: "math.Pow is not supported"},
+	{fn: differential.SortStrings, reject: "sort.Strings is not supported"},
+	{fn: differential.ErrorsNew, reject: "errors.New is not supported"},
+	{fn: differential.TimeNow, reject: "time.Now is not supported"},
+	{fn: differential.DurationString, reject: "method call time.Duration.String is not supported"},
+
+	// Same-package helpers (Options.TranslateHelpers).
+	{fn: differential.HelperSameFile},
+	{fn: differential.HelperRecursion},
+	{fn: differential.HelperMultipleReturns},
+	{fn: differential.HelperCrossFile},
+	{fn: differential.HelperReadsConstant},
+	{fn: differential.HelperScopeAndCopy},
+	{fn: differential.HelperShadowedByLocal},
+	{fn: differential.HelperTakesClosure},
+	{fn: differential.HelperDeferNamedResult},
+	{fn: differential.HelperPanics},
+	{fn: differential.HelperBlankParams},
+	{fn: differential.HelperValueMethods},
+	{fn: differential.HelperPointerMethod, reject: "methods with pointer receivers are not supported"},
+	{fn: differential.HelperGeneric, reject: "generic function Map is not supported"},
+	{fn: differential.HelperVariadic, reject: "variadic function sum is not supported"},
+	{fn: differential.HelperPackageVariable, reject: "package-level variable counter is not supported"},
 }
 
 const differentialSource = "testdata/differential/cases.go"
 
 func TestDifferentialGoMatchesWLang(t *testing.T) {
-	src, err := os.ReadFile(differentialSource)
-	if err != nil {
-		t.Fatal(err)
-	}
-	filename, err := filepath.Abs(differentialSource)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range differentialCases {
 		name := funcName(tc.fn)
 		t.Run(name, func(t *testing.T) {
+			filename := funcFile(tc.fn)
+			src, err := os.ReadFile(filename)
+			if err != nil {
+				t.Fatal(err)
+			}
 			want := runNative(tc.fn)
-			result, err := go2wlang.TranslateFileDetailed(src, go2wlang.Options{FuncName: name, Filename: filename})
+			result, err := go2wlang.TranslateFileDetailed(src, differentialOptions(name, filename))
 			if tc.reject != "" {
 				if err == nil {
 					t.Fatalf("translation accepted; want rejection mentioning %q\n%s", tc.reject, result.JSON)
 				}
-				if !strings.Contains(err.Error(), tc.reject) || !strings.Contains(err.Error(), "cases.go:") {
+				if !strings.Contains(err.Error(), tc.reject) || !strings.Contains(err.Error(), ".go:") {
 					t.Fatalf("rejection %q must mention %q and a source position", err, tc.reject)
 				}
 				return
@@ -204,6 +263,19 @@ func TestDifferentialGoMatchesWLang(t *testing.T) {
 				t.Fatalf("outcome mismatch\nnative: %s %s\nwlang:  %s %s\n%s", want, want.detail, got, got.detail, result.JSON)
 			}
 		})
+	}
+}
+
+// differentialOptions translates name from the differential package with its
+// sibling files loaded, same-package helpers translated into the program and
+// no host packages, so every call runs in the interpreter.
+func differentialOptions(name, filename string) go2wlang.Options {
+	return go2wlang.Options{
+		FuncName:         name,
+		Filename:         filename,
+		Dir:              filepath.Dir(filename),
+		TranslateHelpers: true,
+		HostPackages:     []string{},
 	}
 }
 
@@ -234,6 +306,13 @@ func (o *outcome) sortElements() {
 func funcName(fn any) string {
 	full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	return full[strings.LastIndex(full, ".")+1:]
+}
+
+// funcFile is the source file that declares fn.
+func funcFile(fn any) string {
+	pc := reflect.ValueOf(fn).Pointer()
+	file, _ := runtime.FuncForPC(pc).FileLine(pc)
+	return file
 }
 
 func runNative(fn any) (out outcome) {

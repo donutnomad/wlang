@@ -122,7 +122,7 @@ func tc481Adder(a, b int64) int64 { return a + b }
 
 func TestTC481_CallPlanGoFuncIdentity(t *testing.T) {
 	reg := wflang.DefaultRegistry()
-	if err := reg.BindGoPackage("math", registry.PackageSpec{
+	if err := reg.BindGoPackage("calc", registry.PackageSpec{
 		Functions: []registry.FuncSpec{
 			{GoName: "Adder", Impl: tc481Adder, Pure: true},
 		},
@@ -131,7 +131,7 @@ func TestTC481_CallPlanGoFuncIdentity(t *testing.T) {
 	}
 	eng := wflang.NewEngine(wflang.EngineOptions{Registry: reg})
 	src := []byte(`[{"return":{"Adder":[
-		{"pkg":"math"},
+		{"pkg":"calc"},
 		{"literal":{"type":"int64","value":"1"}},
 		{"literal":{"type":"int64","value":"2"}}
 	]}}]`)

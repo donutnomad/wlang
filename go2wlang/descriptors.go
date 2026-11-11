@@ -159,6 +159,18 @@ func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.Ty
 	if err := extractor.collectBodyLocalTypes(fn.Body); err != nil {
 		return nil, EntrySignature{}, err
 	}
+	// Translated helpers use their own parameter, result and local types.
+	for _, helper := range t.helperOrder {
+		decl := helper.decl
+		for _, fields := range []*ast.FieldList{decl.Recv, decl.Type.Params, decl.Type.Results} {
+			if err := extractor.collectFieldList(fields, false, false); err != nil {
+				return nil, EntrySignature{}, err
+			}
+		}
+		if err := extractor.collectBodyLocalTypes(decl.Body); err != nil {
+			return nil, EntrySignature{}, err
+		}
+	}
 	for id, descriptor := range extractor.descriptors {
 		descriptor.Fingerprint = wltypes.DescriptorFingerprint(descriptor)
 		extractor.descriptors[id] = descriptor
@@ -561,6 +573,10 @@ func (e *descriptorExtractor) collectBodyLocalTypes(body *ast.BlockStmt) error {
 		}
 		typ := e.translator.info.TypeOf(typeExpr)
 		if typ == nil || isErrorGoType(typ) || isContextLikeType(typ) || !containsNamedDTO(typ) {
+			return
+		}
+		if err := e.translator.checkForeignType(typ, typeExpr); err != nil {
+			firstErr = err
 			return
 		}
 		if _, err := e.addType(typ, pos); err != nil {

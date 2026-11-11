@@ -17,8 +17,13 @@ import (
 )
 
 // RegisterCore binds all pure standard library packages to r.
-// Packages: str, num, arr, val, to, json.
+// Packages: str, num, arr, val, to, json, path, and the Go standard-library
+// functions listed in gostd.go under their import paths (strings, strconv,
+// fmt, math).
 func RegisterCore(r *registry.Registry) error {
+	if err := registerGoStdlib(r); err != nil {
+		return err
+	}
 	if err := r.BindGoPackage("str", strPackage()); err != nil {
 		return err
 	}

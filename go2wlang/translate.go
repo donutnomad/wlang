@@ -37,6 +37,23 @@ type Options struct {
 	Dir              string
 	EmbedImportMap   bool
 	LocalPackageName string
+	// Overlay holds further files of the package under Dir (absolute path to
+	// content) that replace the files on disk while the package is loaded,
+	// for callers that rewrite helper functions before translation.
+	Overlay map[string][]byte
+	// TranslateHelpers translates the functions and value-receiver methods
+	// of the translated package that the entry function calls, directly or
+	// through other helpers, into the program. When false, a call of a
+	// same-package function is a host call of the symbol pkg.Func. Function
+	// values (a same-package function named without calling it) stay host
+	// symbols either way.
+	TranslateHelpers bool
+	// HostPackages lists the import paths, outside the standard library,
+	// whose functions and methods the host binds. A call of a function or
+	// method of any other non-standard package is rejected. Nil places no
+	// restriction. Standard-library calls are limited to the functions
+	// stdlib binds regardless of this option.
+	HostPackages []string
 }
 
 // EntrySignature describes the translated function's payload boundary: which
@@ -129,6 +146,7 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 	t := &translator{
 		fset:             fset,
 		file:             file,
+		files:            unit.files,
 		imports:          importAliases(file, opts.Dir),
 		locals:           newLocalScopes(),
 		localPackageName: localPackageName(file, opts),
@@ -137,6 +155,20 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 	t.info = unit.info
 	for k, v := range opts.PackageAliases {
 		t.imports[k] = v
+	}
+	if opts.HostPackages != nil {
+		t.hostPackages = map[string]bool{}
+		for _, path := range opts.HostPackages {
+			t.hostPackages[path] = true
+		}
+	}
+	if opts.TranslateHelpers {
+		if err := t.collectHelpers(fn); err != nil {
+			return nil, err
+		}
+	}
+	if err := t.rejectPackageVariables(fn.Body); err != nil {
+		return nil, err
 	}
 	descriptors, entry, err := t.extractDescriptors(fn)
 	if err != nil {
@@ -166,6 +198,11 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 	if len(prefix) > 0 {
 		body = append(prefix, body...)
 	}
+	helpers, err := t.helperDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	body = append(helpers, body...)
 	lang := opts.Lang
 	if lang == "" {
 		lang = "wflang/v1"
@@ -207,8 +244,11 @@ func TranslateFileDetailed(src []byte, opts Options) (*Result, error) {
 }
 
 type translator struct {
-	fset             *token.FileSet
-	file             *ast.File
+	fset *token.FileSet
+	file *ast.File
+	// files are the syntax trees of the translated package (only file when
+	// the package could not be loaded).
+	files            []*ast.File
 	info             *gotypes.Info
 	imports          map[string]string
 	usedImports      map[string]bool
@@ -217,6 +257,11 @@ type translator struct {
 	packagePath      string
 	namedResults     []resultSpec
 	descriptorNames  map[string]bool
+	hostPackages     map[string]bool
+	// helpers are the same-package functions the program defines, by Go
+	// object; helperOrder keeps their discovery order.
+	helpers     map[gotypes.Object]*helperFunc
+	helperOrder []*helperFunc
 	// temps numbers the hidden variables the translation introduces.
 	temps int
 	// targets is the stack of statements break/continue can address inside
@@ -333,6 +378,7 @@ func wrapBreakable(body []any, target *branchTarget) []any {
 type translationUnit struct {
 	fset        *token.FileSet
 	file        *ast.File
+	files       []*ast.File
 	info        *gotypes.Info
 	packagePath string
 }
@@ -351,10 +397,16 @@ func loadTranslationUnit(src []byte, opts Options, filename string) (translation
 	}
 	absFilename = filepath.Clean(absFilename)
 	fset := token.NewFileSet()
+	overlay := map[string][]byte{absFilename: src}
+	for name, content := range opts.Overlay {
+		if _, ok := overlay[name]; !ok {
+			overlay[name] = content
+		}
+	}
 	cfg := &packages.Config{
 		Dir:     absDir,
 		Fset:    fset,
-		Overlay: map[string][]byte{absFilename: src},
+		Overlay: overlay,
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports,
 	}
@@ -383,7 +435,7 @@ func loadTranslationUnit(src []byte, opts Options, filename string) (translation
 		pos := fset.Position(candidate.Pos())
 		candidateName, _ := filepath.Abs(pos.Filename)
 		if filepath.Clean(candidateName) == absFilename {
-			return translationUnit{fset: fset, file: candidate, info: pkg.TypesInfo, packagePath: pkg.PkgPath}, nil
+			return translationUnit{fset: fset, file: candidate, files: pkg.Syntax, info: pkg.TypesInfo, packagePath: pkg.PkgPath}, nil
 		}
 	}
 	return loadSingleFileUnit(src, filename, opts.Dir)
@@ -409,7 +461,7 @@ func loadSingleFileUnit(src []byte, filename, dir string) (translationUnit, erro
 		return translationUnit{}, err
 	}
 	return translationUnit{
-		fset: fset, file: file,
+		fset: fset, file: file, files: []*ast.File{file},
 		info:        typeInfoForFile(fset, file, dir),
 		packagePath: file.Name.Name,
 	}, nil
@@ -684,6 +736,20 @@ func (t *translator) varDecl(decl *ast.GenDecl) ([]any, error) {
 		}
 		if len(vs.Values) != 0 && len(vs.Values) != len(vs.Names) && len(vs.Values) != 1 {
 			return nil, t.unsupported(vs, "var declaration value count is unsupported", "use one value per name")
+		}
+		if len(vs.Names) > 1 && len(vs.Values) == 1 {
+			// var a, b = f(): one call, destructured.
+			rhs, err := t.expr(vs.Values[0])
+			if err != nil {
+				return nil, err
+			}
+			names := make([]any, len(vs.Names))
+			for i, name := range vs.Names {
+				names[i] = name.Name
+				t.locals.add(name.Name)
+			}
+			out = append(out, map[string]any{"let": []any{names, rhs}})
+			continue
 		}
 		for i, name := range vs.Names {
 			var expr any
@@ -1541,6 +1607,9 @@ func (t *translator) expr(e ast.Expr) (any, error) {
 	case *ast.SelectorExpr:
 		root := selectorRoot(x)
 		if root != "" && t.isPackageSelector(x) {
+			if err := t.packageValue(x); err != nil {
+				return nil, err
+			}
 			t.markImport(root)
 			return symbolNode(selectorPath(x)), nil
 		}
@@ -1795,6 +1864,14 @@ func (t *translator) callExpr(x *ast.CallExpr) (any, error) {
 			if t.locals.has(id.Name) {
 				return t.dynamicCall(varNode(id.Name), x.Args)
 			}
+			if helper, ok := t.helperFor(id); ok {
+				return t.dynamicCall(varNode(helper.name), x.Args)
+			}
+			if t.info != nil {
+				if fn, ok := t.info.Uses[id].(*gotypes.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() != t.packagePath {
+					return nil, t.unsupported(x, "call of dot-imported function "+id.Name+" is not supported", "import the package by name")
+				}
+			}
 			if sym, ok := t.staticIdentSymbol(id); ok {
 				return t.dynamicCall(symbolNode(sym), x.Args)
 			}
@@ -1974,6 +2051,11 @@ func (t *translator) funcLit(x *ast.FuncLit) (any, error) {
 }
 
 func (t *translator) functionFieldTypeName(expr ast.Expr) string {
+	// A named scalar type (time.Duration, type Status string) is its scalar
+	// in WLang, so the values a function receives and returns carry that type.
+	if scalar := t.scalarType(expr); scalar != "" {
+		return scalar
+	}
 	if t.info != nil {
 		if typ := t.info.TypeOf(expr); typ != nil && t.usesDescriptorType(typ) {
 			if name := t.languageTypeName(typ); name != "" {
@@ -2015,11 +2097,20 @@ func (t *translator) hostCall(x *ast.CallExpr) (any, error) {
 	args := []any{}
 	root := selectorRoot(sel)
 	if root != "" && t.isPackageSelector(sel) {
-		t.markImport(root)
-		args = append(args, map[string]any{"pkg": root})
+		pkg, err := t.packageCallName(x, sel, root)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, map[string]any{"pkg": pkg})
 	} else {
+		if helper, ok := t.helperFor(sel); ok {
+			return t.dynamicCall(varNode(helper.name), append([]ast.Expr{sel.X}, x.Args...))
+		}
 		recv, err := t.expr(sel.X)
 		if err != nil {
+			return nil, err
+		}
+		if err := t.checkMethodCall(x, sel); err != nil {
 			return nil, err
 		}
 		args = append(args, recv)

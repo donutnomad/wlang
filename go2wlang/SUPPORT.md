@@ -56,6 +56,7 @@
 
 - `var x = expr`
 - `var x T`
+- `var a, b = f()`（一次调用，解构结果）
 - `x := expr`
 - `x = expr`
 - `x += expr`, `x -= expr`, `x *= expr`, `x /= expr`, `x %= expr`
@@ -98,7 +99,7 @@
 - 省略 init 或 condition 的 `for`（`for {}`、`for cond {}`）；init 不是 `i := from`。
 - `range` 遍历 string、channel、函数、指针，或 `int64` 以外的整数类型；`for k, v = range`（用 `=`）。
 - `defer` 非调用表达式。
-- 包级变量、`init` 函数。
+- 读写包级变量（常量在使用处折叠）。
 - `recover`、`min`、`max`、`clear`、`print` 等未列出的内建函数。
 
 ## 表达式
@@ -130,9 +131,8 @@
 - 类型断言：`x.(T)` 生成 `type.assert`。
 - 双值类型断言：`v, ok := x.(T)` 生成 `type.assert.ok`。
 - 泛型函数实例化调用会去掉类型实参并翻译普通调用。
-- `reflect` 和 `unsafe` 包选择器调用按普通包函数调用翻译。
 - 导入包函数值：`pkg.Func` 生成 `symbol`。
-- 当前包顶层函数值：`Helper` 生成 `symbol`。
+- 当前包顶层函数值：`Helper` 生成 `symbol`（宿主绑定的符号，`TranslateHelpers` 下同样如此）。
 - receiver 方法值：`receiver.Method` 生成 `method`。
 - 函数字面量作为值。
 - 函数变量调用：`fn(args...)`。
@@ -185,6 +185,38 @@
 翻译期拒绝：
 
 - 可变参数展开：`fn(xs...)`（`append(xs, ys...)` 除外）。
+- 点导入的函数调用。
+- 标准库函数中 wlang 没有绑定的（见下一节），以及标准库函数作为值（`f := strings.ToUpper`）、标准库包级变量。
+- 设置了 `Options.HostPackages` 时：不在列表里的非标准库包的函数调用与方法调用，以及未绑定的标准库包里的类型的局部变量（`var b strings.Builder`）。
+
+## 标准库函数
+
+`stdlib.RegisterCore`（`wflang.DefaultRegistry` 使用它）以导入路径为包名绑定下列 Go 标准库函数，实现就是 Go 函数本身，结果、边界行为与错误文本与构建宿主的 Go 工具链相同。翻译器按导入路径生成调用（`import s "strings"` 里的 `s.ToUpper(x)` 生成 `{"ToUpper":[{"pkg":"strings"},…]}`），其余标准库函数在翻译期拒绝，诊断列出该包已绑定的函数。清单在 `stdlib/gostd.go`，`stdlib.GoFunction`、`stdlib.GoFunctions`、`stdlib.GoPackages` 查询它。
+
+| 包 | 函数 |
+| --- | --- |
+| `strings` | `Contains` `Count` `EqualFold` `Fields` `HasPrefix` `HasSuffix` `Index` `Join` `LastIndex` `Repeat` `Replace` `ReplaceAll` `Split` `ToLower` `ToUpper` `Trim` `TrimLeft` `TrimPrefix` `TrimRight` `TrimSpace` `TrimSuffix` |
+| `strconv` | `Atoi` `FormatBool` `FormatFloat` `FormatInt` `Itoa` `ParseBool` `ParseFloat` `ParseInt` |
+| `fmt` | `Sprintf` `Sprint` `Sprintln` `Errorf` |
+| `math` | `Abs` `Ceil` `Floor` `Inf` `IsInf` `IsNaN` `Max` `Min` `Mod` `NaN` `Round` `Sqrt` `Trunc` |
+
+- `strings.Split`、`strings.Fields` 返回 `array<string>`。多返回值（`strconv.Atoi` 的 `(int, error)`）是 tuple，错误值的 `Error()` 与 Go 相同。
+- `math` 的常量（`math.MaxInt64`、`math.Pi`）是 Go 常量，在使用处折叠。
+- `fmt`：格式串必须是常量；支持 `%v %d %b %o %x %X %s %t %e %E %f %F %g %G`，`Errorf` 另有 `%w`；标志 `+ - 空格 0`，`#` 只配 `%x %X %o %b`；宽度与精度写数字。操作数只能是布尔、整数、浮点、字符串（具名类型须没有方法）与 `error`，翻译器按 Go 规则核对动词与操作数类别和个数。拒绝的理由：Go `int` 在 WLang 里是 `int64`，打印类型名的输出（`%T`、`%!d(string=x)` 这类错配输出）会不同；带 `String`/`Error`/`Format` 方法的类型、复合类型与 `any` 的格式化依赖 Go 类型。
+- 不绑定：`strconv.Quote` 与 `%q`（输出随 Go 版本的 Unicode 表变化）、`math.Pow` 等非精确舍入函数（arm64 上可能编译成 FMA，与 amd64 结果不同）。`ToUpper`、`ToLower`、`EqualFold` 也依赖 Unicode 表，只有新 Unicode 版本新增的大小写字符会在升级 Go 后变化。
+
+## 同包函数（`Options.TranslateHelpers`）
+
+开启后，入口函数直接或间接调用的当前包函数与值接收者方法被翻译进同一个程序：每个函数在程序开头绑定到变量 `__wlang_func_<Name>`（方法为 `__wlang_method_<Type>_<Name>`，接收者是第一个参数），调用点调用该变量。函数在入口函数体执行前全部绑定，闭包按名字在调用时解析，所以互相调用与递归都成立。
+
+- 支持：同文件与包内其他文件的函数（`Options.Dir` 加载整个包，`Options.Overlay` 可以替换包里其他文件的内容）、多返回值与命名返回值、`defer`、递归、函数参数、标准库调用、包级常量、值接收者方法（`m.Add(1)`，接收者按值传入）。
+- 每个函数在自己的作用域里翻译：只看见参数、局部变量、常量与其他同包函数。具名标量类型的参数与结果（`time.Duration`、`type Status string`）用其标量类型声明。
+- 翻译期拒绝：泛型函数、泛型类型的方法、可变参数函数、指针接收者方法、指针上的方法调用、嵌入字段提升的方法、经当前包接口类型的方法调用、读写包级变量。
+- 函数值（不在调用位置的 `Helper`）仍生成宿主 `symbol`。
+
+## 宿主包（`Options.HostPackages`）
+
+非 nil 时，列表里的导入路径是宿主绑定的包：只有这些包（与已绑定的标准库函数）的函数与方法可以调用，其他包的函数调用、方法调用以及未绑定的标准库类型的局部变量在翻译期拒绝。nil 不做限制。
 
 ## 复合字面量
 
@@ -276,6 +308,9 @@ type Result struct {
 - `Dir`：设置用于导入解析和类型感知解析的目录。
 - `EmbedImportMap`：将 `importMap` 写入生成的 JSON。
 - `LocalPackageName`：控制当前包结构体字面量类型名，例如 `policy.Args`。
+- `Overlay`：包里其他文件的替换内容（绝对路径 → 内容）。
+- `TranslateHelpers`：把被调用的同包函数翻译进程序，见「同包函数」。
+- `HostPackages`：宿主绑定的非标准库包，见「宿主包」。
 
 元数据存储选择：
 
@@ -286,7 +321,7 @@ type Result struct {
 
 ## 与 Go 的语义一致性
 
-`go2wlang/differential_test.go` 对 `go2wlang/testdata/differential/cases.go` 里的每个函数做差分测试：原生运行 Go 函数，再翻译成 WLang 在解释器里运行，比较 JSON 规范化后的结果（失败只比较是否失败）；标注为拒绝的用例要求翻译期诊断带上写法名称与源码位置。新增翻译能力时同时在该文件里加用例。
+`go2wlang/differential_test.go` 对 `go2wlang/testdata/differential/` 里登记的每个函数做差分测试：原生运行 Go 函数，再以 `TranslateHelpers`、空 `HostPackages` 翻译成 WLang 在解释器里运行，比较 JSON 规范化后的结果（失败只比较是否失败）；标注为拒绝的用例要求翻译期诊断带上写法名称与源码位置。`stdlib.go` 覆盖每个已绑定的标准库函数（空串、负数、解析错误、Unicode、各 `fmt` 动词与标志），`helpers.go` 与 `helpers_other.go` 覆盖同包函数的各种形态。新增翻译能力时同时加用例。
 
 运行期语义与 Go 一致的要点：
 
