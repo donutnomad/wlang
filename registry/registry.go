@@ -43,6 +43,11 @@ type FuncSpec struct {
 	// (LANGUAGE.md §13.2). The string is the migration guidance shown to users.
 	Deprecated string
 	Impl       any
+	// Guard, when set, runs before Impl with the call's arguments (variadic
+	// ones spread out) and the execution's limits. It computes the size of the
+	// result from the arguments and returns an E_BUDGET error for a result
+	// over the limits, so the call fails before the result is allocated.
+	Guard func(limits types.Limits, args []any) error
 }
 
 // PackageSpec describes a package of functions.
@@ -336,6 +341,7 @@ type boundFunc struct {
 	pure       bool
 	capability []string
 	deprecated string
+	guard      func(types.Limits, []any) error
 }
 
 type boundPackage struct {
@@ -1054,6 +1060,7 @@ func (r *Registry) BindGoPackage(name string, spec PackageSpec) error {
 		}
 		bf.registry = r
 		bf.deprecated = fs.Deprecated
+		bf.guard = fs.Guard
 		pkg.funcs[fs.GoName] = bf
 	}
 	r.packages[name] = pkg
@@ -1608,9 +1615,27 @@ func (bf *boundFunc) call(ctx context.Context, recv *types.Value,
 		in = append(in, rv)
 	}
 
+	limits := types.LimitsFrom(ctx)
+	if bf.guard != nil && limits != (types.Limits{}) {
+		guardArgs := make([]any, 0, len(args))
+		for _, rv := range in[len(in)-len(args):] {
+			guardArgs = append(guardArgs, rv.Interface())
+		}
+		if err := runGuard(bf, limits, guardArgs, path); err != nil {
+			return types.Value{}, err
+		}
+	}
 	out, panicErr := safeCall(bf.impl, in, bf.name, path)
 	if panicErr != nil {
 		return types.Value{}, panicErr
+	}
+	for i, ov := range out {
+		if isErrorType(bf.outTypes[i]) || !ov.IsValid() || !ov.CanInterface() {
+			continue
+		}
+		if err := limits.CheckValue(ov.Interface()); err != nil {
+			return types.Value{}, budgetError(bf.name, path, err)
+		}
 	}
 	for _, outArg := range outArgs {
 		if err := outArg.commit(); err != nil {
@@ -1656,6 +1681,29 @@ func (bf *boundFunc) call(ctx context.Context, recv *types.Value,
 		vals[i] = wv.Go()
 	}
 	return types.NewValue(types.TupleType(names), vals), nil
+}
+
+// runGuard runs a FuncSpec.Guard; a panic in it fails the call like a panic
+// in the function itself.
+func runGuard(bf *boundFunc, limits types.Limits, args []any, path string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = werr.Newf(werr.CodePanic, "%q size check panicked: %v", bf.name, r).WithPath(path)
+		}
+	}()
+	if err := bf.guard(limits, args); err != nil {
+		return budgetError(bf.name, path, err)
+	}
+	return nil
+}
+
+// budgetError names the host function in a size-limit error and keeps
+// E_BUDGET as its code.
+func budgetError(name, path string, err error) error {
+	if le, ok := err.(*werr.LangError); ok {
+		return werr.Newf(le.Code, "%s: %s", name, le.Message).WithPath(path)
+	}
+	return werr.Newf(werr.CodeBudget, "%s: %v", name, err).WithPath(path)
 }
 
 // errValue converts an error-typed reflect.Value into a wflang Value. A nil

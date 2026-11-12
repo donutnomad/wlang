@@ -1374,7 +1374,7 @@ engine := wflang.NewEngine(wflang.EngineOptions{
     Budget: wflang.Budget{
         MaxSteps: 10000,
         MaxCallDepth: 64,
-        MaxAllocBytes: 8 << 20,
+        MaxStringBytes: 8 << 20,
     },
 })
 
@@ -2179,11 +2179,15 @@ type LangError struct {
 | `MaxCallDepth` | 最大调用深度 |
 | `MaxLoopIterations` | 最大循环次数 |
 | `MaxRoutines` | 最大 goroutine 启动数量 |
-| `MaxArrayLength` | 最大数组长度 |
-| `MaxObjectKeys` | 最大对象键数量 |
-| `MaxStringBytes` | 最大字符串大小 |
-| `MaxAllocBytes` | 最大估算分配 |
+| `MaxArrayLength` | 最大数组长度：数组字面量、`arr.push`、channel 缓冲区、宿主函数返回的数组 |
+| `MaxObjectKeys` | 最大对象键数量：map / 对象字面量、`map.set` 新增的键、宿主函数返回的 map |
+| `MaxStringBytes` | 单个字符串的最大字节数：字符串 `+`、宿主函数返回的字符串；`bigInt` / `bigDecimal` 运算结果的大小也受它限制 |
+| `MaxAllocBytes` | 保留字段，接受但不执行 |
 | `Timeout` | 最大运行时长 |
+
+字段为 0 表示不限制。超出时以 `E_BUDGET` 中止执行，程序不能捕获。三个大小预算在分配之前检查：字符串 `+`、`bigInt` / `bigDecimal` 运算，以及结果可能远大于参数的标准库函数（`strings.Repeat`、`Replace`、`ReplaceAll`、`Join`、`Split`、`Fields`，`fmt.Sprintf` / `Sprint` / `Sprintln` / `Errorf`，`strconv.FormatFloat`，`str.Format` / `Replace` / `Join` / `Split`，`arr.Flatten`，`to.String`、`to.JSON`、`json.Stringify`）由参数算出结果大小或上界，超出时不调用函数。其余宿主函数（包括宿主自己绑定的函数）在返回后检查结果最外层的字符串字节数、数组长度与 map 键数；`strings.ToUpper` 这类结果至多是参数常数倍的函数走这条路径。上界只依赖参数的值，同一调用在任何宿主上得到相同结论；引用自身的 map 或数组在格式化与 JSON 编码前以 `E_BUDGET` 拒绝。
+
+大小预算限制的是单个值。程序仍可以创建许多接近上限的值，它们占用的内存总量由 `MaxSteps`、`MaxArrayLength` 等计数预算与宿主的资源限制共同约束。
 
 ### 10.2 沙箱原则
 

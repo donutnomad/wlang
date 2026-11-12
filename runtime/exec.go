@@ -97,17 +97,39 @@ func sigToErr(s Signal) error {
 	return nil
 }
 
-// Budget defines runtime limits (§10.1).
+// Budget defines runtime limits (§10.1). A zero field means unlimited.
 type Budget struct {
 	MaxSteps          int64
 	MaxCallDepth      int
 	MaxLoopIterations int64
 	MaxRoutines       int
-	MaxArrayLength    int
-	MaxObjectKeys     int
-	MaxStringBytes    int
-	MaxAllocBytes     int64
+	// MaxArrayLength bounds every array a program builds: literals, appends,
+	// channel buffers and arrays returned by host functions.
+	MaxArrayLength int
+	// MaxObjectKeys bounds map and object literals, keys added by map
+	// assignment, and maps returned by host functions.
+	MaxObjectKeys int
+	// MaxStringBytes bounds every string a program builds (concatenation and
+	// host function results) and the magnitude of bigInt / bigDecimal
+	// arithmetic results. Operations whose result size follows from their
+	// inputs (string +, strings.Repeat, Replace, Join, fmt, JSON encoding) are
+	// refused before the result is allocated.
+	MaxStringBytes int
+	// MaxAllocBytes is reserved: it is accepted and not enforced. Live memory
+	// is bounded only through the per-value limits above, the number of
+	// values a program can create (MaxSteps) and the host's own limits.
+	MaxAllocBytes int64
 	// Timeout is enforced via ctx deadline; no direct field needed here.
+}
+
+// Limits returns the per-value size limits that host calls receive through
+// their context.
+func (b Budget) Limits() types.Limits {
+	return types.Limits{
+		MaxStringBytes: b.MaxStringBytes,
+		MaxArrayLength: b.MaxArrayLength,
+		MaxObjectKeys:  b.MaxObjectKeys,
+	}
 }
 
 // RoutineErrorHandler observes errors raised inside a fire-and-forget routine.
@@ -201,6 +223,9 @@ func NewExecutor(ctx context.Context, scope *Scope, reg HostRegistry,
 		ctx = context.Background()
 	}
 	scope.setValueValidator(reg)
+	if limits := budget.Limits(); limits != (types.Limits{}) {
+		ctx = types.WithLimits(ctx, limits)
+	}
 	return &Executor{
 		ctx: ctx, scope: scope, registry: reg, pkgs: pkgs, budget: budget,
 		routineCount: new(atomicInt32),

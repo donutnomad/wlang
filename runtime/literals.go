@@ -207,6 +207,10 @@ func (e *Executor) evalChanLit(x *ast.ChanLit) (types.Value, error) {
 			return types.Value{}, werr.Newf(werr.CodeRuntime,
 				"chan buffer must be non-negative, got %d", n).WithPath(x.Path())
 		}
+		if e.budget.MaxArrayLength > 0 && n > int64(e.budget.MaxArrayLength) {
+			return types.Value{}, werr.Newf(werr.CodeBudget,
+				"MaxArrayLength exceeded (%d): chan buffer %d", e.budget.MaxArrayLength, n).WithPath(x.Path())
+		}
 		bufSize = int(n)
 	}
 	ch := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, et), bufSize)
@@ -380,6 +384,10 @@ func mapSet(e *Executor, c *ast.Call) (types.Value, error) {
 	}
 	if rv.IsNil() {
 		return types.Value{}, werr.New(werr.CodeRuntime, "assignment to entry in nil map").WithPath(c.Path())
+	}
+	if e.budget.MaxObjectKeys > 0 && rv.Len() >= e.budget.MaxObjectKeys && !rv.MapIndex(rk).IsValid() {
+		return types.Value{}, werr.Newf(werr.CodeBudget,
+			"MaxObjectKeys exceeded (%d)", e.budget.MaxObjectKeys).WithPath(c.Path())
 	}
 	rv.SetMapIndex(rk, rvalue)
 	null, _ := types.NewNull()

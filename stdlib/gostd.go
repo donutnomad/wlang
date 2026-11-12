@@ -22,21 +22,24 @@ import (
 // release; math.Pow and the other non-exact float functions may be compiled
 // with fused multiply-add on arm64), and everything with IO, time, randomness
 // or mutable receivers (strings.Builder).
+//
+// Functions whose result can outgrow their arguments carry a Guard
+// (limits.go) that refuses an oversized result before it is allocated.
 var goStdlib = map[string][]registry.FuncSpec{
 	"strings": {
 		{GoName: "Contains", Impl: strings.Contains},
 		{GoName: "Count", Impl: strings.Count},
 		{GoName: "EqualFold", Impl: strings.EqualFold},
-		{GoName: "Fields", Impl: func(s string) types.Value { return stringArray(strings.Fields(s)) }},
+		{GoName: "Fields", Impl: func(s string) types.Value { return stringArray(strings.Fields(s)) }, Guard: guardFields},
 		{GoName: "HasPrefix", Impl: strings.HasPrefix},
 		{GoName: "HasSuffix", Impl: strings.HasSuffix},
 		{GoName: "Index", Impl: strings.Index},
-		{GoName: "Join", Impl: strings.Join},
+		{GoName: "Join", Impl: strings.Join, Guard: guardJoin},
 		{GoName: "LastIndex", Impl: strings.LastIndex},
-		{GoName: "Repeat", Impl: strings.Repeat},
-		{GoName: "Replace", Impl: strings.Replace},
-		{GoName: "ReplaceAll", Impl: strings.ReplaceAll},
-		{GoName: "Split", Impl: func(s, sep string) types.Value { return stringArray(strings.Split(s, sep)) }},
+		{GoName: "Repeat", Impl: strings.Repeat, Guard: guardRepeat},
+		{GoName: "Replace", Impl: strings.Replace, Guard: guardReplace},
+		{GoName: "ReplaceAll", Impl: strings.ReplaceAll, Guard: guardReplaceAll},
+		{GoName: "Split", Impl: func(s, sep string) types.Value { return stringArray(strings.Split(s, sep)) }, Guard: guardSplit},
 		{GoName: "ToLower", Impl: strings.ToLower},
 		{GoName: "ToUpper", Impl: strings.ToUpper},
 		{GoName: "Trim", Impl: strings.Trim},
@@ -49,7 +52,7 @@ var goStdlib = map[string][]registry.FuncSpec{
 	"strconv": {
 		{GoName: "Atoi", Impl: strconv.Atoi},
 		{GoName: "FormatBool", Impl: strconv.FormatBool},
-		{GoName: "FormatFloat", Impl: strconv.FormatFloat},
+		{GoName: "FormatFloat", Impl: strconv.FormatFloat, Guard: guardFormatFloat},
 		{GoName: "FormatInt", Impl: strconv.FormatInt},
 		{GoName: "Itoa", Impl: strconv.Itoa},
 		{GoName: "ParseBool", Impl: strconv.ParseBool},
@@ -57,10 +60,10 @@ var goStdlib = map[string][]registry.FuncSpec{
 		{GoName: "ParseInt", Impl: strconv.ParseInt},
 	},
 	"fmt": {
-		{GoName: "Errorf", Impl: fmt.Errorf},
-		{GoName: "Sprint", Impl: fmt.Sprint},
-		{GoName: "Sprintf", Impl: fmt.Sprintf},
-		{GoName: "Sprintln", Impl: fmt.Sprintln},
+		{GoName: "Errorf", Impl: fmt.Errorf, Guard: guardSprintf},
+		{GoName: "Sprint", Impl: fmt.Sprint, Guard: guardSprint},
+		{GoName: "Sprintf", Impl: fmt.Sprintf, Guard: guardSprintf},
+		{GoName: "Sprintln", Impl: fmt.Sprintln, Guard: guardSprintln},
 	},
 	"math": {
 		{GoName: "Abs", Impl: math.Abs},

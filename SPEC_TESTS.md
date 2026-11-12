@@ -1527,15 +1527,15 @@
 
 ### TC-804 MaxArrayLength / MaxObjectKeys / MaxStringBytes
 - Spec: §10.1
-- Given: 超大输入
-- When: Decode / 求值
-- Then: `E_BUDGET`
+- Given: 字符串 `+`、`bigInt` 乘法、`map.set`、channel 缓冲区、标准库的放大函数（`strings.Repeat`、`Replace`、`Join`、`Split`、`fmt.Sprintf` 等）或宿主函数的结果超过预算
+- When: 求值
+- Then: `E_BUDGET`；放大函数在分配结果之前失败，刚好不超出时结果与 Go 相同（`wflang/budget_size_test.go`、`stdlib/limits_test.go`）
 
 ### TC-805 MaxAllocBytes
 - Spec: §10.1
-- Given: 估算超过预算
+- Given: `MaxAllocBytes` 设为很小的值
 - When: Run
-- Then: `E_BUDGET`
+- Then: 照常运行：字段保留，不执行
 
 ### TC-806 Timeout
 - Spec: §10.1

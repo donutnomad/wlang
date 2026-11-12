@@ -558,7 +558,11 @@ func arithmeticOp(op string) opHandler {
 		}
 		res := vals[0]
 		for _, rhs := range vals[1:] {
-			r, err := arithStep(op, res, rhs)
+			err := e.checkArithSize(op, res, rhs)
+			var r types.Value
+			if err == nil {
+				r, err = arithStep(op, res, rhs)
+			}
 			if err != nil {
 				if le, ok := err.(*werr.LangError); ok {
 					return types.Value{}, le.WithPath(c.Path())
@@ -569,6 +573,46 @@ func arithmeticOp(op string) opHandler {
 		}
 		return res, nil
 	}
+}
+
+// checkArithSize refuses a string concatenation or bigInt / bigDecimal
+// operation whose result would exceed MaxStringBytes, before computing it.
+// Concatenation is exact; for big numbers the bound is the bit length the
+// operation can produce (a product or a fraction sum adds the operands' bits).
+func (e *Executor) checkArithSize(op string, a, b types.Value) error {
+	if e.budget.MaxStringBytes <= 0 || a.TypeName() != b.TypeName() {
+		return nil
+	}
+	var size int64
+	switch x := a.Go().(type) {
+	case string:
+		y, ok := b.Go().(string)
+		if !ok || op != "+" {
+			return nil
+		}
+		size = int64(len(x)) + int64(len(y))
+	case *big.Int:
+		y, ok := b.Go().(*big.Int)
+		if !ok || x == nil || y == nil {
+			return nil
+		}
+		bits := int64(max(x.BitLen(), y.BitLen())) + 1
+		if op == "*" {
+			bits = int64(x.BitLen()) + int64(y.BitLen())
+		}
+		size = bits/8 + 1
+	case *big.Rat:
+		y, ok := b.Go().(*big.Rat)
+		if !ok || x == nil || y == nil {
+			return nil
+		}
+		bits := int64(x.Num().BitLen()) + int64(x.Denom().BitLen()) +
+			int64(y.Num().BitLen()) + int64(y.Denom().BitLen()) + 1
+		size = bits/8 + 1
+	default:
+		return nil
+	}
+	return e.budget.Limits().CheckString(size)
 }
 
 func arithStep(op string, a, b types.Value) (types.Value, error) {

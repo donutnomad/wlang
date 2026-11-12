@@ -232,10 +232,10 @@ func strPackage() registry.PackageSpec {
 			{GoName: "Contains", Impl: strings.Contains, Pure: true},
 			{GoName: "StartsWith", Impl: strings.HasPrefix, Pure: true},
 			{GoName: "EndsWith", Impl: strings.HasSuffix, Pure: true},
-			{GoName: "Replace", Impl: strReplace, Pure: true},
-			{GoName: "Split", Impl: strings.Split, Pure: true},
-			{GoName: "Join", Impl: strings.Join, Pure: true},
-			{GoName: "Format", Impl: strFormat, Pure: true},
+			{GoName: "Replace", Impl: strReplace, Pure: true, Guard: guardReplaceAll},
+			{GoName: "Split", Impl: strings.Split, Pure: true, Guard: guardSplit},
+			{GoName: "Join", Impl: strings.Join, Pure: true, Guard: guardJoin},
+			{GoName: "Format", Impl: strFormat, Pure: true, Guard: guardSprintf},
 		},
 	}
 }
@@ -277,7 +277,7 @@ func arrPackage() registry.PackageSpec {
 			{GoName: "Contains", Impl: arrContains, Pure: true},
 			{GoName: "Sort", Impl: arrSort, Pure: true},
 			{GoName: "Distinct", Impl: arrDistinct, Pure: true},
-			{GoName: "Flatten", Impl: arrFlatten, Pure: true},
+			{GoName: "Flatten", Impl: arrFlatten, Pure: true, Guard: guardFlatten},
 		},
 	}
 }
@@ -503,7 +503,7 @@ func valIsError(v any) bool {
 func toPackage() registry.PackageSpec {
 	return registry.PackageSpec{
 		Functions: []registry.FuncSpec{
-			{GoName: "String", Impl: toString, Pure: true},
+			{GoName: "String", Impl: toString, Pure: true, Guard: guardToString},
 			{GoName: "Int8", Impl: toInt8, Pure: true},
 			{GoName: "Int16", Impl: toInt16, Pure: true},
 			{GoName: "Int32", Impl: toInt32, Pure: true},
@@ -517,7 +517,7 @@ func toPackage() registry.PackageSpec {
 			{GoName: "Boolean", Impl: toBoolean, Pure: true},
 			{GoName: "BigInt", Impl: toBigInt, Pure: true},
 			{GoName: "BigDecimal", Impl: toBigDecimal, Pure: true},
-			{GoName: "JSON", Impl: toJSON, Pure: true},
+			{GoName: "JSON", Impl: toJSON, Pure: true, Guard: guardJSON},
 		},
 	}
 }
@@ -676,7 +676,7 @@ func jsonPackage() registry.PackageSpec {
 	return registry.PackageSpec{
 		Functions: []registry.FuncSpec{
 			{GoName: "Parse", Impl: jsonParse, Pure: true},
-			{GoName: "Stringify", Impl: jsonStringify, Pure: true},
+			{GoName: "Stringify", Impl: jsonStringify, Pure: true, Guard: guardJSON},
 		},
 	}
 }
