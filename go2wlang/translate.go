@@ -62,15 +62,19 @@ type Options struct {
 //
 // InputVar is the Go parameter name. TranslateFileDetailed seeds every named
 // parameter into the local scope, so the translated body refers to the entry
-// parameter by that identifier; a host binding a typed value must use this
-// exact name rather than inventing one.
+// parameter by that identifier; a host binding the input value must use this
+// exact name rather than inventing one. It is set for every input the body can
+// reference, descriptor backed or not (map[string]any, any, scalars), and is
+// empty only when there is no such parameter (absent, unnamed, or several
+// sharing one type).
 //
 // Input and Output hold descriptor IDs as produced by addType, which are also
 // the keys of Result.Types. Pointer parameters therefore carry a "*"-prefixed ID.
 // Either field is empty when the corresponding type is absent or is not
 // descriptor backed, which keeps them consistent with what extractDescriptors
-// actually collected: error-only results, plain scalar parameters, and
-// parameters the body cannot reference (unnamed, or several sharing one type).
+// actually collected: error-only results, plain data such as map[string]any or
+// scalars, and parameters the body cannot reference. Input is never set without
+// InputVar.
 // The translated function's own name is not repeated here: Result.FuncName
 // already carries it.
 type EntrySignature struct {

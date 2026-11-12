@@ -386,14 +386,17 @@ func (e *descriptorExtractor) extractEntrySignature(fn *ast.FuncDecl) (EntrySign
 	var entry EntrySignature
 
 	name, typ, ok := entryInputParam(e.translator, fn.Type.Params)
+	if ok && typ != nil && !isErrorGoType(typ) && !isContextLikeType(typ) {
+		// The body refers to the parameter by its Go name whatever its type, so
+		// the host needs the name even when there is no descriptor to decode
+		// with: an untyped map[string]any input is bound as-is under InputVar.
+		entry.InputVar = name
+	}
 	if ok && !entryDescriptorSkipped(typ) {
 		id, err := e.addType(typ, fn.Type.Params.Pos(), e.typeString(typ))
 		if err != nil {
 			return EntrySignature{}, err
 		}
-		// Both halves must survive together: an ID with no variable leaves the
-		// host nowhere to bind, a variable with no ID leaves it nothing to decode.
-		entry.InputVar = name
 		entry.Input = id
 	}
 

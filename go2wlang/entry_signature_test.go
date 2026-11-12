@@ -1,9 +1,11 @@
 package go2wlang_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/donutnomad/wlang/go2wlang"
+	"github.com/donutnomad/wlang/wflang"
 )
 
 // TestEntrySignatureExtraction covers the payload boundary cases a workflow
@@ -60,12 +62,36 @@ func Workflow(ctx context.Context, items []In) error { return nil }`,
 		},
 		{
 			// A bare scalar never reaches Types at a non-payload boundary, so
-			// naming it in Entry would dangle.
-			name: "scalar input yields no entry input",
+			// naming it as Input would dangle; the body still refers to it by
+			// name, so InputVar is set.
+			name: "scalar input names the variable only",
 			source: `package orders
 import "context"
 func Workflow(ctx context.Context, name string) error { return nil }`,
-			wantVar: "", wantIn: "", wantOut: "",
+			wantVar: "name", wantIn: "", wantOut: "",
+		},
+		{
+			// Untyped data has no descriptor but the body references it by the
+			// parameter name, which is not necessarily "input".
+			name: "map input names the variable only",
+			source: `package orders
+import "context"
+func Workflow(ctx context.Context, req map[string]any) error { return nil }`,
+			wantVar: "req", wantIn: "", wantOut: "",
+		},
+		{
+			name: "any input names the variable only",
+			source: `package orders
+import "context"
+func Workflow(ctx context.Context, payload any) error { return nil }`,
+			wantVar: "payload", wantIn: "", wantOut: "",
+		},
+		{
+			name: "plain slice input names the variable only",
+			source: `package orders
+import "context"
+func Workflow(ctx context.Context, ids []string) error { return nil }`,
+			wantVar: "ids", wantIn: "", wantOut: "",
 		},
 		{
 			name: "no input at all",
@@ -188,6 +214,38 @@ func Workflow(ctx context.Context, in In) error {
 	}
 	if !containsSubstring(string(result.JSON), `"in.Amount"`) {
 		t.Fatalf("body does not reference the parameter by InputVar:\n%s", result.JSON)
+	}
+}
+
+// TestUntypedEntryInputRunsUnderInputVar binds an untyped input the way a host
+// does, under Entry.InputVar, and runs the program: the body must read the
+// parameter by the name the author chose.
+func TestUntypedEntryInputRunsUnderInputVar(t *testing.T) {
+	source := `package orders
+import "context"
+func Workflow(ctx context.Context, req map[string]any) any {
+	return req["k"]
+}`
+	result, err := go2wlang.TranslateFileDetailed([]byte(source), go2wlang.Options{FuncName: "Workflow"})
+	if err != nil {
+		t.Fatalf("TranslateFileDetailed: %v", err)
+	}
+	if result.Entry.InputVar != "req" || result.Entry.Input != "" {
+		t.Fatalf("Entry = %+v, want InputVar req and no Input", result.Entry)
+	}
+	eng := wflang.NewEngine(wflang.EngineOptions{Registry: wflang.DefaultRegistry()})
+	prog, err := eng.CompileJSON(result.JSON)
+	if err != nil {
+		t.Fatalf("CompileJSON: %v", err)
+	}
+	value, err := prog.Run(context.Background(), wflang.RunOptions{Vars: map[string]any{
+		result.Entry.InputVar: map[string]any{"k": "v"},
+	}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, ok := value.Go().(string); !ok || got != "v" {
+		t.Fatalf("result = %#v, want %q", value.Go(), "v")
 	}
 }
 
