@@ -143,7 +143,7 @@
 - string 的下标与切片 `s[i]`、`s[a:b]`。
 - 完整切片表达式 `xs[a:b:c]`。
 - 计算值上的字段访问与赋值：`xs[i].F`、`f().F`、`x.(T).F`（先赋给局部变量）。
-- descriptor 结构体的提升字段（嵌入字段本身在 descriptor 里已被拒绝）。
+- descriptor 结构体的提升字段（嵌入字段本身在类型表里已被拒绝）。
 - 移位与位运算 `<<`、`>>`、`&`、`|`、`^`、`&^`（常量运算除外）。
 - 表达式里的 `append`；只支持语句 `xs = append(xs, v...)`。
 - `new(T)`，当 `T` 是本包声明的结构体。
@@ -230,11 +230,31 @@
 - 无键结构体字面量：`Args{"aaa"}`，字段名来自 Go 类型信息。
 - 省略类型的元素字面量：`[]Point{{X: 1}}`、`map[string]Point{"a": {X: 1}}`，类型来自 Go 类型信息。
 - 当前包结构体字面量作为调用参数：`a.Book(ctx, Args{Name: "aaa"})`。
+- 具名 slice/array/map 类型的字面量：`Tags{"a"}`（`type Tags []string`）、`Ledger{"x": {1, 2}}`，按底层类型生成，值可赋给该具名类型。
+- 省略类型的 slice/array/map 元素字面量：`map[string]Amounts{"x": {1, 2}}`。
 - 使用 `Options.LocalPackageName` 控制当前包结构体字面量的生成类型前缀。
 
 当前范围外：
 
 - 复合字面量内部嵌套当前范围外的表达式。
+
+## 类型表（`Result.Types`）
+
+程序能接触到的每个数据类型都有 descriptor，嵌套深度不限：
+
+- 根是入口函数与每个同包函数里所有表达式、声明标识符和类型表达式的 Go 类型，包括宿主调用的参数与结果、只出现在复合字面量里的类型、闭包参数与结果、转换、类型断言和泛型宿主函数的类型实参。函数、元组与 channel 类型只取其中携带的数据类型。
+- 根是数据形状（指针、slice、array、map 套在数据叶子外）且含程序具名类型时登记：当前包或既非标准库、也不在 `HostPackages` 里的包（契约包、DTO 包）声明的具名 struct、基础类型、slice、array、map。宿主包与标准库类型由宿主绑定，不作为根；作为程序类型的字段时随字段登记。
+- 从根出发沿结构体字段、指针/slice/array 元素、map 键值和具名类型的底层类型走到不动点。递归类型（`type Node struct{ Kids []Node; Parent *Node }`）与互相递归的类型按 ID 互相引用；运行时允许经由指针、slice、map 的环，直接自包含的环在登记时拒绝。
+- 类型表是以 ID 为键的 map，JSON 按键排序输出，同一源码的翻译结果逐字节相同。
+- 同一元素类型的 slice 与定长 array 共用 WLang 名 `array<T>`，按名查找解析到 slice。
+
+翻译期按 `file:line` 拒绝、带根类型内的路径（`[]` 是元素，`[key]` 是 map 键）：
+
+- channel：`Courier.Hops[].Queue (chan int): channels cannot cross workflow boundaries`。
+- 函数：`functions cannot cross workflow boundaries`。
+- 有方法的接口：`interfaces with methods cannot cross workflow boundaries`。
+- 匿名结构体类型、嵌入字段、未导出字段、`complex`/`uintptr` 等 json/plain-v1 之外的基础类型、非字符串底层的 map 键、自定义 JSON 编解码、重复的 JSON 字段名、`json` tag 的其他选项。
+- 泛型类型实例化：`generic type instantiations are not supported`。
 
 ## Channel 和并发
 
@@ -280,6 +300,8 @@ type Result struct {
 	Imports  map[string]string
 	FuncName string
 	Source   string
+	Types    map[string]wltypes.TypeDescriptor
+	Entry    EntrySignature
 }
 ```
 

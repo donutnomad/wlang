@@ -57,6 +57,10 @@ func (r *Registry) ValidateValue(typeName string, value types.Value, path string
 }
 
 func (r *Registry) validateValueByID(id string, value types.Value, path string) error {
+	if id == types.TAny {
+		// any holds a value of every type, as in Go.
+		return nil
+	}
 	if value.TypeName() == types.TNull {
 		if r.isNullableTypeID(id) {
 			return nil
@@ -64,10 +68,18 @@ func (r *Registry) validateValueByID(id string, value types.Value, path string) 
 		return codecError(path, "type %s does not accept null", r.languageNameForTypeID(id))
 	}
 	expected := r.languageNameForTypeID(id)
-	if value.TypeName() != expected {
+	if value.TypeName() != expected && !r.assignableToNamed(id, value.TypeName()) {
 		return codecError(path, "expected %s, got %s", expected, value.TypeName())
 	}
 	return r.validateCarrierByID(id, value.Go(), path)
+}
+
+// assignableToNamed reports whether a value of the unnamed type typeName may
+// be stored as the named type id, as Go assigns []int64{1} to a field of type
+// Amounts []int64: the named type's underlying type is typeName itself.
+func (r *Registry) assignableToNamed(id, typeName string) bool {
+	descriptor, ok := r.collectionDescriptor(id)
+	return ok && descriptor.Kind == types.TypeKindAlias && r.languageNameForTypeID(descriptor.Underlying) == typeName
 }
 
 func (r *Registry) validateCarrierByID(id string, carrier any, path string) error {
@@ -195,6 +207,10 @@ func (r *Registry) isNullableTypeID(id string) bool {
 		return true
 	}
 	descriptor, ok := r.collectionDescriptor(id)
+	if ok && descriptor.Kind == types.TypeKindAlias {
+		// A named slice, map or pointer type is nil like its underlying type.
+		return r.isNullableTypeID(descriptor.Underlying)
+	}
 	return ok && (descriptor.Kind == types.TypeKindPointer || descriptor.Kind == types.TypeKindSlice || descriptor.Kind == types.TypeKindMap)
 }
 
@@ -621,6 +637,9 @@ func (r *Registry) encodeCarrierByID(id string, carrier any, path string) (any, 
 		if id == types.TError {
 			return nil, codecError(path, "error is outside JSON payload values")
 		}
+		if id == types.TAny {
+			return r.encodeAnyCarrier(carrier, path)
+		}
 		return carrier, nil
 	}
 	descriptor, ok := r.collectionDescriptor(id)
@@ -733,6 +752,47 @@ func (r *Registry) encodeCarrierByID(id string, carrier any, path string) (any, 
 	default:
 		return nil, codecError(path, "type descriptor %q has unsupported kind %q", id, descriptor.Kind)
 	}
+}
+
+// encodeAnyCarrier encodes the dynamic value an any holds. A record carries
+// its own type name and encodes through its descriptor, wherever it sits
+// inside the arrays and maps of the value.
+func (r *Registry) encodeAnyCarrier(carrier any, path string) (any, error) {
+	switch current := carrier.(type) {
+	case *types.Record:
+		id, ok := r.resolveCodecType(current.TypeName())
+		if !ok {
+			return nil, codecError(path, "record type %q has no JSON descriptor", current.TypeName())
+		}
+		return r.encodeCarrierByID(id, current, path)
+	case []any:
+		if current == nil {
+			return nil, nil
+		}
+		out := make([]any, len(current))
+		for i, item := range current {
+			encoded, err := r.encodeAnyCarrier(item, codecIndexPath(path, i))
+			if err != nil {
+				return nil, err
+			}
+			out[i] = encoded
+		}
+		return out, nil
+	case map[string]any:
+		if current == nil {
+			return nil, nil
+		}
+		out := make(map[string]any, len(current))
+		for key, item := range current {
+			encoded, err := r.encodeAnyCarrier(item, codecFieldPath(path, key))
+			if err != nil {
+				return nil, err
+			}
+			out[key] = encoded
+		}
+		return out, nil
+	}
+	return carrier, nil
 }
 
 func (r *Registry) descriptorHasStringUnderlying(id string, visiting map[string]bool) bool {

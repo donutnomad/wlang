@@ -108,18 +108,32 @@ func (t *translator) packageLanguageName(pkg *gotypes.Package) string {
 type descriptorExtractor struct {
 	translator  *translator
 	descriptors map[string]wltypes.TypeDescriptor
-	visiting    map[string]bool
+	// visiting holds the named types whose descriptor is being built; meeting
+	// one again is a recursive reference, which the descriptor graph keeps as
+	// a plain ID.
+	visiting map[string]bool
 }
 
+// extractDescriptors builds the program's type table: a descriptor for every
+// data type the translated code can touch, at any nesting depth.
+//
+// The roots are the types of every expression and declaration in the entry
+// function and in each translated helper (collectProgramTypes); addType then
+// walks each root's type graph to a fixed point. The payload boundaries, the
+// entry signature and update handler parameters and results, additionally
+// register types without a program-declared named type in them, such as
+// []string, because the host decodes those payloads by descriptor.
 func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.TypeDescriptor, EntrySignature, error) {
 	extractor := &descriptorExtractor{
 		translator: t, descriptors: map[string]wltypes.TypeDescriptor{}, visiting: map[string]bool{},
 	}
-	if err := extractor.collectFieldList(fn.Type.Params, true, false); err != nil {
+	if err := extractor.collectProgramTypes(fn); err != nil {
 		return nil, EntrySignature{}, err
 	}
-	if err := extractor.collectFieldList(fn.Type.Results, false, false); err != nil {
-		return nil, EntrySignature{}, err
+	for _, helper := range t.helperOrder {
+		if err := extractor.collectProgramTypes(helper.decl); err != nil {
+			return nil, EntrySignature{}, err
+		}
 	}
 	// Before fingerprinting: addType may still register descriptors, and every
 	// one of them has to be stamped by the loop below.
@@ -140,11 +154,11 @@ func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.Ty
 		if !ok {
 			return true
 		}
-		if err := extractor.collectFieldList(literal.Type.Params, true, true); err != nil {
+		if err := extractor.collectPayloadFields(literal.Type.Params, true); err != nil {
 			firstErr = err
 			return false
 		}
-		if err := extractor.collectFieldList(literal.Type.Results, false, true); err != nil {
+		if err := extractor.collectPayloadFields(literal.Type.Results, false); err != nil {
 			firstErr = err
 			return false
 		}
@@ -152,24 +166,6 @@ func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.Ty
 	})
 	if firstErr != nil {
 		return nil, EntrySignature{}, firstErr
-	}
-	// body-local DTO：`var detail ChargeFailure` / `detail := ChargeFailure{}` 这类局部变量
-	// 不进入口或契约签名，但翻译出的 zero<T> 仍需要 descriptor，否则运行期报
-	// E_SYMBOL: type not registered。这里沿既有 addType 机制补齐。
-	if err := extractor.collectBodyLocalTypes(fn.Body); err != nil {
-		return nil, EntrySignature{}, err
-	}
-	// Translated helpers use their own parameter, result and local types.
-	for _, helper := range t.helperOrder {
-		decl := helper.decl
-		for _, fields := range []*ast.FieldList{decl.Recv, decl.Type.Params, decl.Type.Results} {
-			if err := extractor.collectFieldList(fields, false, false); err != nil {
-				return nil, EntrySignature{}, err
-			}
-		}
-		if err := extractor.collectBodyLocalTypes(decl.Body); err != nil {
-			return nil, EntrySignature{}, err
-		}
 	}
 	for id, descriptor := range extractor.descriptors {
 		descriptor.Fingerprint = wltypes.DescriptorFingerprint(descriptor)
@@ -182,6 +178,157 @@ func (t *translator) extractDescriptors(fn *ast.FuncDecl) (map[string]wltypes.Ty
 	return extractor.descriptors, entry, nil
 }
 
+// collectProgramTypes registers every program data type that node's code
+// touches: the type of each expression (call arguments and results, composite
+// literals and their elided elements, conversions, closures, selectors, host
+// calls of every kind) and of each declared identifier and type expression.
+//
+// A root is a program data type when a named type declared by the translated
+// package or by another non-host, non-standard package occurs in it
+// (programDataRoot). Host and standard-library types are bound by the host
+// and get no descriptor of their own; function, tuple and channel types are
+// looked through for the data types they carry.
+func (e *descriptorExtractor) collectProgramTypes(node ast.Node) error {
+	info := e.translator.info
+	if info == nil || node == nil {
+		return nil
+	}
+	var firstErr error
+	ast.Inspect(node, func(n ast.Node) bool {
+		if firstErr != nil {
+			return false
+		}
+		switch current := n.(type) {
+		case *ast.ValueSpec:
+			if current.Type != nil {
+				firstErr = e.translator.checkForeignType(info.TypeOf(current.Type), current.Type)
+			}
+		case *ast.CompositeLit:
+			if current.Type != nil {
+				firstErr = e.translator.checkForeignType(info.TypeOf(current.Type), current.Type)
+			}
+		}
+		if firstErr != nil {
+			return false
+		}
+		if expr, ok := n.(ast.Expr); ok {
+			if typ := info.TypeOf(expr); typ != nil {
+				firstErr = e.collectRoot(typ, expr.Pos())
+			}
+		}
+		return firstErr == nil
+	})
+	return firstErr
+}
+
+// collectRoot registers the program data types carried by typ.
+func (e *descriptorExtractor) collectRoot(typ gotypes.Type, pos token.Pos) error {
+	typ = gotypes.Unalias(typ)
+	if e.programDataRoot(typ) {
+		_, err := e.addType(typ, pos, e.typeString(typ))
+		return err
+	}
+	switch current := typ.(type) {
+	case *gotypes.Tuple:
+		for i := 0; i < current.Len(); i++ {
+			if err := e.collectRoot(current.At(i).Type(), pos); err != nil {
+				return err
+			}
+		}
+	case *gotypes.Signature:
+		if err := e.collectRoot(current.Params(), pos); err != nil {
+			return err
+		}
+		return e.collectRoot(current.Results(), pos)
+	case *gotypes.Chan:
+		return e.collectRoot(current.Elem(), pos)
+	case *gotypes.Pointer:
+		return e.collectRoot(current.Elem(), pos)
+	case *gotypes.Slice:
+		return e.collectRoot(current.Elem(), pos)
+	case *gotypes.Array:
+		return e.collectRoot(current.Elem(), pos)
+	case *gotypes.Map:
+		if err := e.collectRoot(current.Key(), pos); err != nil {
+			return err
+		}
+		return e.collectRoot(current.Elem(), pos)
+	case *gotypes.Struct:
+		for i := 0; i < current.NumFields(); i++ {
+			if err := e.collectRoot(current.Field(i).Type(), pos); err != nil {
+				return err
+			}
+		}
+	case *gotypes.Named:
+		// A host or standard-library generic such as a typed channel handle
+		// carries program data in its type arguments.
+		args := current.TypeArgs()
+		for i := 0; i < args.Len(); i++ {
+			if err := e.collectRoot(args.At(i), pos); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// programDataRoot reports whether typ is a data shape, a tree of pointers,
+// slices, arrays and maps over data leaves, in which a program named type
+// occurs. Such a type gets a descriptor of its own: zero values and literals
+// of it, such as zero<map<string,pkg.T>>, resolve through it.
+func (e *descriptorExtractor) programDataRoot(typ gotypes.Type) bool {
+	program := false
+	var shape func(gotypes.Type) bool
+	shape = func(typ gotypes.Type) bool {
+		switch current := gotypes.Unalias(typ).(type) {
+		case *gotypes.Named:
+			if e.programNamed(current) {
+				program = true
+				return true
+			}
+			_, basic := current.Underlying().(*gotypes.Basic)
+			return basic
+		case *gotypes.Basic:
+			return true
+		case *gotypes.Interface:
+			return current.NumMethods() == 0
+		case *gotypes.Pointer:
+			return shape(current.Elem())
+		case *gotypes.Slice:
+			return shape(current.Elem())
+		case *gotypes.Array:
+			return shape(current.Elem())
+		case *gotypes.Map:
+			return shape(current.Key()) && shape(current.Elem())
+		}
+		return false
+	}
+	return shape(typ) && program
+}
+
+// programNamed reports whether named is a data type the program itself
+// declares: in the translated package or in a package that is neither the
+// standard library nor bound by the host (a contract or DTO package). Error
+// and context types are host values whatever their package.
+func (e *descriptorExtractor) programNamed(named *gotypes.Named) bool {
+	pkg := named.Obj().Pkg()
+	if pkg == nil || isContextLikeType(named) || isErrorGoType(named) {
+		return false
+	}
+	if pkg.Path() != e.translator.packagePath && (isStdlibPath(pkg.Path()) || e.translator.hostPackages[pkg.Path()]) {
+		return false
+	}
+	switch named.Underlying().(type) {
+	case *gotypes.Struct, *gotypes.Basic, *gotypes.Pointer, *gotypes.Slice, *gotypes.Array, *gotypes.Map:
+		return true
+	}
+	return false
+}
+
+func (e *descriptorExtractor) typeString(typ gotypes.Type) string {
+	return gotypes.TypeString(typ, func(pkg *gotypes.Package) string { return pkg.Name() })
+}
+
 func isSetUpdateHandlerCall(call *ast.CallExpr) bool {
 	switch target := call.Fun.(type) {
 	case *ast.SelectorExpr:
@@ -192,7 +339,9 @@ func isSetUpdateHandlerCall(call *ast.CallExpr) bool {
 	return false
 }
 
-func (e *descriptorExtractor) collectFieldList(fields *ast.FieldList, skipFirst, payloadBoundary bool) error {
+// collectPayloadFields registers the payload types of an update handler's
+// parameters or results, data shapes without a program named type included.
+func (e *descriptorExtractor) collectPayloadFields(fields *ast.FieldList, skipFirst bool) error {
 	if fields == nil {
 		return nil
 	}
@@ -209,10 +358,10 @@ func (e *descriptorExtractor) collectFieldList(fields *ast.FieldList, skipFirst,
 			}
 			index++
 			typ := e.translator.info.TypeOf(field.Type)
-			if typ == nil || isErrorGoType(typ) || isContextLikeType(typ) || (!payloadBoundary && !containsNamedDTO(typ)) {
+			if typ == nil || isErrorGoType(typ) || isContextLikeType(typ) {
 				continue
 			}
-			if _, err := e.addType(typ, field.Pos()); err != nil {
+			if _, err := e.addType(typ, field.Pos(), e.typeString(typ)); err != nil {
 				return err
 			}
 		}
@@ -220,16 +369,15 @@ func (e *descriptorExtractor) collectFieldList(fields *ast.FieldList, skipFirst,
 	return nil
 }
 
-// entryDescriptorSkipped reports whether collectFieldList would have skipped this
-// type at a non-payload boundary. Entry extraction must ask the same question,
-// otherwise Entry could name an ID that never made it into Result.Types.
+// entryDescriptorSkipped reports whether the entry boundary has no descriptor
+// for typ: plain data such as int64 or []string travels untyped.
 func entryDescriptorSkipped(typ gotypes.Type) bool {
 	return typ == nil || isErrorGoType(typ) || isContextLikeType(typ) || !containsNamedDTO(typ)
 }
 
 // extractEntrySignature reads the payload boundary of the translated function.
 //
-// It runs from inside extractDescriptors, after the field lists are collected
+// It runs from inside extractDescriptors, after the program types are collected
 // but before fingerprinting, so every ID it returns is a key of the descriptor
 // map. It deliberately reuses addType rather than canonicalNamedID, because a
 // pointer parameter's descriptor is keyed "*"+elem and canonicalNamedID cannot
@@ -239,7 +387,7 @@ func (e *descriptorExtractor) extractEntrySignature(fn *ast.FuncDecl) (EntrySign
 
 	name, typ, ok := entryInputParam(e.translator, fn.Type.Params)
 	if ok && !entryDescriptorSkipped(typ) {
-		id, err := e.addType(typ, fn.Type.Params.Pos())
+		id, err := e.addType(typ, fn.Type.Params.Pos(), e.typeString(typ))
 		if err != nil {
 			return EntrySignature{}, err
 		}
@@ -250,7 +398,7 @@ func (e *descriptorExtractor) extractEntrySignature(fn *ast.FuncDecl) (EntrySign
 	}
 
 	if typ, ok := entryOutputType(e.translator, fn.Type.Results); ok && !entryDescriptorSkipped(typ) {
-		id, err := e.addType(typ, fn.Type.Results.Pos())
+		id, err := e.addType(typ, fn.Type.Results.Pos(), e.typeString(typ))
 		if err != nil {
 			return EntrySignature{}, err
 		}
@@ -279,7 +427,7 @@ func entryInputParam(t *translator, params *ast.FieldList) (string, gotypes.Type
 		if count > 1 {
 			return "", nil, false
 		}
-		// Mirror collectFieldList(skipFirst: true): the leading ctx is not payload.
+		// The leading ctx is not payload.
 		if index == 0 {
 			index += count
 			continue
@@ -349,7 +497,12 @@ func isContextLikeType(typ gotypes.Type) bool {
 	return ok && named.Obj().Name() == "Context"
 }
 
-func (e *descriptorExtractor) addType(typ gotypes.Type, pos token.Pos) (string, error) {
+// addType registers the descriptor of typ and, transitively, of every type
+// it reaches: struct fields, pointer, slice, array and map elements, named
+// types' underlying types. Recursive types terminate: a named type met again
+// while its descriptor is being built is referenced by ID. path names the
+// position inside the root type, such as Input.Items[].Meta, for diagnostics.
+func (e *descriptorExtractor) addType(typ gotypes.Type, pos token.Pos, path string) (string, error) {
 	typ = gotypes.Unalias(typ)
 	switch current := typ.(type) {
 	case *gotypes.Basic:
@@ -357,49 +510,55 @@ func (e *descriptorExtractor) addType(typ gotypes.Type, pos token.Pos) (string, 
 		if isSerializableBuiltin(name) {
 			return name, nil
 		}
-		return "", e.unsupported(pos, "type "+current.String()+" is outside json/plain-v1")
+		return "", e.unsupportedAt(pos, path, typ, "type "+current.String()+" is outside json/plain-v1")
 	case *gotypes.Interface:
 		if current.NumMethods() == 0 {
 			return wltypes.TAny, nil
 		}
-		return "", e.unsupported(pos, "interface "+current.String()+" is outside json/plain-v1")
+		return "", e.unsupportedAt(pos, path, typ, "interfaces with methods cannot cross workflow boundaries")
 	case *gotypes.Named:
-		return e.addNamed(current, pos)
+		return e.addNamed(current, pos, path)
 	case *gotypes.Pointer:
-		elemID, err := e.addType(current.Elem(), pos)
+		elemID, err := e.addType(current.Elem(), pos, path)
 		if err != nil {
 			return "", err
 		}
 		return e.addComposite(wltypes.TypeKindPointer, "*"+elemID, e.translator.languageTypeName(current), "", elemID, 0), nil
 	case *gotypes.Slice:
-		elemID, err := e.addType(current.Elem(), pos)
+		elemID, err := e.addType(current.Elem(), pos, path+"[]")
 		if err != nil {
 			return "", err
 		}
 		return e.addComposite(wltypes.TypeKindSlice, "[]"+elemID, e.translator.languageTypeName(current), "", elemID, 0), nil
 	case *gotypes.Array:
-		elemID, err := e.addType(current.Elem(), pos)
+		elemID, err := e.addType(current.Elem(), pos, path+"[]")
 		if err != nil {
 			return "", err
 		}
 		id := fmt.Sprintf("[%d]%s", current.Len(), elemID)
 		return e.addComposite(wltypes.TypeKindArray, id, e.translator.languageTypeName(current), "", elemID, current.Len()), nil
 	case *gotypes.Map:
-		keyID, err := e.addType(current.Key(), pos)
+		keyID, err := e.addType(current.Key(), pos, path+"[key]")
 		if err != nil {
 			return "", err
 		}
 		if !e.hasStringUnderlying(keyID, map[string]bool{}) {
-			return "", e.unsupported(pos, "json/plain-v1 map keys must be string")
+			return "", e.unsupportedAt(pos, path, typ, "json/plain-v1 map keys must be string")
 		}
-		elemID, err := e.addType(current.Elem(), pos)
+		elemID, err := e.addType(current.Elem(), pos, path+"[]")
 		if err != nil {
 			return "", err
 		}
 		id := "map[string]" + elemID
 		return e.addComposite(wltypes.TypeKindMap, id, e.translator.languageTypeName(current), keyID, elemID, 0), nil
+	case *gotypes.Chan:
+		return "", e.unsupportedAt(pos, path, typ, "channels cannot cross workflow boundaries")
+	case *gotypes.Signature:
+		return "", e.unsupportedAt(pos, path, typ, "functions cannot cross workflow boundaries")
+	case *gotypes.Struct:
+		return "", e.unsupportedAt(pos, path, typ, "anonymous struct types are not supported; declare a named type")
 	default:
-		return "", e.unsupported(pos, "type "+typ.String()+" is outside json/plain-v1")
+		return "", e.unsupportedAt(pos, path, typ, "type "+typ.String()+" is outside json/plain-v1")
 	}
 }
 
@@ -418,16 +577,19 @@ func (e *descriptorExtractor) hasStringUnderlying(id string, visiting map[string
 	return e.hasStringUnderlying(descriptor.Underlying, visiting)
 }
 
-func (e *descriptorExtractor) addNamed(current *gotypes.Named, pos token.Pos) (string, error) {
+func (e *descriptorExtractor) addNamed(current *gotypes.Named, pos token.Pos, path string) (string, error) {
 	id := canonicalNamedID(current, e.translator.packagePath)
 	if _, ok := e.descriptors[id]; ok {
 		return id, nil
 	}
 	if e.visiting[id] {
-		return "", e.unsupported(pos, "recursive type graph at "+id)
+		return id, nil
+	}
+	if current.TypeArgs().Len() > 0 {
+		return "", e.unsupportedAt(pos, path, current, "generic type instantiations are not supported; declare a non-generic type")
 	}
 	if hasCustomJSONMethods(current) {
-		return "", e.unsupported(pos, "custom JSON codec on "+id+" requires a dedicated payload encoding")
+		return "", e.unsupportedAt(pos, path, current, "custom JSON codec on "+id+" requires a dedicated payload encoding")
 	}
 	e.visiting[id] = true
 	defer delete(e.visiting, id)
@@ -438,23 +600,24 @@ func (e *descriptorExtractor) addNamed(current *gotypes.Named, pos token.Pos) (s
 		seenJSON := map[string]bool{}
 		for i := 0; i < underlying.NumFields(); i++ {
 			field := underlying.Field(i)
+			fieldPath := path + "." + field.Name()
 			if field.Anonymous() {
-				return "", e.unsupported(field.Pos(), "embedded field "+field.Name()+" is outside json/plain-v1")
+				return "", e.unsupportedAt(field.Pos(), fieldPath, field.Type(), "embedded field "+field.Name()+" is outside json/plain-v1")
 			}
 			if !field.Exported() {
-				return "", e.unsupported(field.Pos(), "unexported field "+field.Name()+" is outside json/plain-v1")
+				return "", e.unsupportedAt(field.Pos(), fieldPath, field.Type(), "unexported field "+field.Name()+" is outside json/plain-v1")
 			}
 			jsonName, omitEmpty, ignored, err := parseJSONFieldTag(underlying.Tag(i), field.Name())
 			if err != nil {
-				return "", e.unsupported(field.Pos(), err.Error())
+				return "", e.unsupportedAt(field.Pos(), fieldPath, field.Type(), err.Error())
 			}
 			if !ignored && seenJSON[jsonName] {
-				return "", e.unsupported(field.Pos(), "duplicate JSON field name "+strconv.Quote(jsonName))
+				return "", e.unsupportedAt(field.Pos(), fieldPath, field.Type(), "duplicate JSON field name "+strconv.Quote(jsonName))
 			}
 			if !ignored {
 				seenJSON[jsonName] = true
 			}
-			fieldTypeID, err := e.addType(field.Type(), field.Pos())
+			fieldTypeID, err := e.addType(field.Type(), field.Pos(), fieldPath)
 			if err != nil {
 				return "", err
 			}
@@ -466,14 +629,13 @@ func (e *descriptorExtractor) addNamed(current *gotypes.Named, pos token.Pos) (s
 			})
 		}
 	default:
-		underlyingID, err := e.addType(current.Underlying(), pos)
+		underlyingID, err := e.addType(current.Underlying(), pos, path)
 		if err != nil {
 			return "", err
 		}
 		descriptor.Kind = wltypes.TypeKindAlias
 		descriptor.Underlying = underlyingID
 	}
-	descriptor.Fingerprint = wltypes.DescriptorFingerprint(descriptor)
 	e.descriptors[id] = descriptor
 	return id, nil
 }
@@ -550,70 +712,20 @@ func parseJSONFieldTag(raw, fallback string) (name string, omitEmpty, ignored bo
 	return name, omitEmpty, false, nil
 }
 
+// unsupportedAt reports a type the program touches that has no json/plain-v1
+// representation, at the source position that brought it in and with its
+// path inside the root type: "Input.Items[].Meta (chan int): channels ...".
+func (e *descriptorExtractor) unsupportedAt(pos token.Pos, path string, typ gotypes.Type, reason string) error {
+	if name := e.typeString(typ); name != path {
+		path += " (" + name + ")"
+	}
+	return e.unsupported(pos, path+": "+reason)
+}
+
 func (e *descriptorExtractor) unsupported(pos token.Pos, reason string) error {
 	position := e.translator.fset.Position(pos)
 	return &DiagnosticError{
 		Filename: position.Filename, Line: position.Line, Column: position.Column,
 		Node: "serializable type", Reason: reason,
 	}
-}
-
-// collectBodyLocalTypes 为函数体内显式声明的局部 DTO 类型补 descriptor。
-//
-// 只收集同时满足 containsNamedDTO 的类型（与入口/契约边界同一套过滤），因此标量与
-// context/error 不会进入 Types。已有 descriptor 的类型由 addType 幂等复用。
-func (e *descriptorExtractor) collectBodyLocalTypes(body *ast.BlockStmt) error {
-	if body == nil {
-		return nil
-	}
-	var firstErr error
-	collect := func(typeExpr ast.Expr, pos token.Pos) {
-		if firstErr != nil || typeExpr == nil {
-			return
-		}
-		typ := e.translator.info.TypeOf(typeExpr)
-		if typ == nil || isErrorGoType(typ) || isContextLikeType(typ) || !containsNamedDTO(typ) {
-			return
-		}
-		if err := e.translator.checkForeignType(typ, typeExpr); err != nil {
-			firstErr = err
-			return
-		}
-		if _, err := e.addType(typ, pos); err != nil {
-			firstErr = err
-		}
-	}
-	ast.Inspect(body, func(node ast.Node) bool {
-		if firstErr != nil {
-			return false
-		}
-		switch current := node.(type) {
-		case *ast.ValueSpec: // var x T
-			collect(current.Type, current.Pos())
-		case *ast.AssignStmt: // x := T{...} / x := &T{...}
-			if current.Tok != token.DEFINE {
-				return true
-			}
-			for _, rhs := range current.Rhs {
-				if literalType := compositeLiteralType(rhs); literalType != nil {
-					collect(literalType, rhs.Pos())
-				}
-			}
-		}
-		return true
-	})
-	return firstErr
-}
-
-// compositeLiteralType 返回复合字面量（含取地址）的类型表达式。
-func compositeLiteralType(expr ast.Expr) ast.Expr {
-	switch current := expr.(type) {
-	case *ast.CompositeLit:
-		return current.Type
-	case *ast.UnaryExpr:
-		if current.Op == token.AND {
-			return compositeLiteralType(current.X)
-		}
-	}
-	return nil
 }

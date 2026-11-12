@@ -37,7 +37,7 @@ func Workflow() error {
 	}
 }
 
-// 标量局部变量不产生 descriptor（同一套 containsNamedDTO 过滤）。
+// 标量局部变量不产生 descriptor：只有含程序具名类型的数据形状才登记。
 func TestBodyLocalScalarHasNoDescriptor(t *testing.T) {
 	src := []byte(`package flows
 func Workflow() error {

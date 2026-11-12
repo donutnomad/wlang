@@ -2135,53 +2135,20 @@ func (t *translator) compositeLit(x *ast.CompositeLit) (any, error) {
 		if elem == "" {
 			return nil, t.unsupported(typ.Elt, "array element type is not supported", "")
 		}
-		items := []any{}
-		for _, el := range x.Elts {
-			if kv, ok := el.(*ast.KeyValueExpr); ok {
-				idx, ok := intLiteralIndex(kv.Key)
-				if !ok {
-					return nil, t.unsupported(kv.Key, "array literal key must be an integer literal", "")
-				}
-				for len(items) <= idx {
-					items = append(items, zeroForTypeName(elem))
-				}
-				v, err := t.expr(kv.Value)
-				if err != nil {
-					return nil, err
-				}
-				items[idx] = v
-				continue
-			}
-			v, err := t.expr(el)
-			if err != nil {
-				return nil, err
-			}
-			items = append(items, v)
-		}
-		return map[string]any{"array": map[string]any{"elem": elem, "items": items}}, nil
+		return t.arrayLiteral(x, elem)
 	case *ast.MapType:
 		k := t.typeName(typ.Key)
 		v := t.typeName(typ.Value)
 		if k == "" || v == "" {
 			return nil, t.unsupported(x.Type, "map key/value type is not supported", "")
 		}
-		entries := []any{}
-		for _, el := range x.Elts {
-			kv, ok := el.(*ast.KeyValueExpr)
-			if !ok {
-				return nil, t.unsupported(el, "map literal requires key/value elements", "")
-			}
-			key, err := t.expr(kv.Key)
-			if err != nil {
-				return nil, err
-			}
-			val, err := t.expr(kv.Value)
-			if err != nil {
-				return nil, err
-			}
-			entries = append(entries, []any{key, val})
+		return t.mapLiteral(x, k, v)
+	case *ast.SelectorExpr, *ast.Ident:
+		if literal, ok, err := t.collectionLiteral(x); ok || err != nil {
+			return literal, err
 		}
-		return map[string]any{"map": map[string]any{"type": []any{k, v}, "entries": entries}}, nil
+	}
+	switch typ := x.Type.(type) {
 	case *ast.SelectorExpr:
 		typeName := selectorPath(typ)
 		root := selectorRoot(typ)
@@ -2199,12 +2166,99 @@ func (t *translator) compositeLit(x *ast.CompositeLit) (any, error) {
 	}
 }
 
+// collectionLiteral translates a literal whose Go type is a slice, array or
+// map: of a named type, such as Tags{"a"} for type Tags []string, or implied
+// by the enclosing literal, such as the {1, 2} in Ledger{"x": {1, 2}}. It
+// becomes the literal of the underlying type, whose values are assignable
+// wherever the named type is.
+func (t *translator) collectionLiteral(x *ast.CompositeLit) (any, bool, error) {
+	if t.info == nil {
+		return nil, false, nil
+	}
+	typ := t.info.TypeOf(x)
+	if typ == nil {
+		return nil, false, nil
+	}
+	switch underlying := typ.Underlying().(type) {
+	case *gotypes.Slice:
+		return t.collectionElemLiteral(x, underlying.Elem(), func(elem string) (any, error) { return t.arrayLiteral(x, elem) })
+	case *gotypes.Array:
+		return t.collectionElemLiteral(x, underlying.Elem(), func(elem string) (any, error) { return t.arrayLiteral(x, elem) })
+	case *gotypes.Map:
+		key := t.languageTypeName(underlying.Key())
+		if key == "" {
+			return nil, true, t.unsupported(x.Type, "map key/value type is not supported", "")
+		}
+		return t.collectionElemLiteral(x, underlying.Elem(), func(elem string) (any, error) { return t.mapLiteral(x, key, elem) })
+	}
+	return nil, false, nil
+}
+
+func (t *translator) collectionElemLiteral(x *ast.CompositeLit, elem gotypes.Type, build func(string) (any, error)) (any, bool, error) {
+	name := t.languageTypeName(elem)
+	if name == "" {
+		return nil, true, t.unsupported(x.Type, "element type "+elem.String()+" is not supported", "")
+	}
+	literal, err := build(name)
+	return literal, true, err
+}
+
+func (t *translator) arrayLiteral(x *ast.CompositeLit, elem string) (any, error) {
+	items := []any{}
+	for _, el := range x.Elts {
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			idx, ok := intLiteralIndex(kv.Key)
+			if !ok {
+				return nil, t.unsupported(kv.Key, "array literal key must be an integer literal", "")
+			}
+			for len(items) <= idx {
+				items = append(items, zeroForTypeName(elem))
+			}
+			v, err := t.expr(kv.Value)
+			if err != nil {
+				return nil, err
+			}
+			items[idx] = v
+			continue
+		}
+		v, err := t.expr(el)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, v)
+	}
+	return map[string]any{"array": map[string]any{"elem": elem, "items": items}}, nil
+}
+
+func (t *translator) mapLiteral(x *ast.CompositeLit, key, value string) (any, error) {
+	entries := []any{}
+	for _, el := range x.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			return nil, t.unsupported(el, "map literal requires key/value elements", "")
+		}
+		k, err := t.expr(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		v, err := t.expr(kv.Value)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, []any{k, v})
+	}
+	return map[string]any{"map": map[string]any{"type": []any{key, value}, "entries": entries}}, nil
+}
+
 // elidedCompositeLit translates an element literal whose type the enclosing
 // literal implies, such as the {X: 1} in []Point{{X: 1}}.
 func (t *translator) elidedCompositeLit(x *ast.CompositeLit) (any, error) {
 	var typ gotypes.Type
 	if t.info != nil {
 		typ = t.info.TypeOf(x)
+	}
+	if literal, ok, err := t.collectionLiteral(x); ok || err != nil {
+		return literal, err
 	}
 	if named, ok := typ.(*gotypes.Named); ok {
 		if _, isStruct := named.Underlying().(*gotypes.Struct); isStruct {
@@ -2567,7 +2621,7 @@ func (t *translator) typeName(e ast.Expr) string {
 		}
 		return "*" + elem
 	case *ast.FuncType:
-		params, returns, ok := funcTypeParts(x)
+		params, returns, ok := t.funcTypeParts(x)
 		if !ok {
 			return ""
 		}

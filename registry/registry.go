@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 
@@ -117,12 +118,35 @@ func (r *Registry) BindDescriptors(descriptors map[string]types.TypeDescriptor) 
 		if prior, ok := r.descriptors[id]; ok && types.DescriptorFingerprint(prior) != types.DescriptorFingerprint(descriptor) {
 			return werr.Newf(werr.CodeASTShape, "type descriptor %q conflicts with existing definition", id)
 		}
-		if priorID, ok := stagedNames[descriptor.LanguageName]; ok && priorID != id {
-			return werr.Newf(werr.CodeASTShape, "language type %q maps to both %q and %q", descriptor.LanguageName, priorID, id)
-		}
 		descriptor.Fingerprint = types.DescriptorFingerprint(descriptor)
 		candidates[id] = descriptor
-		stagedNames[descriptor.LanguageName] = id
+	}
+	// Each language name resolves to one descriptor. The only names several
+	// descriptors share are array<T>: a slice and fixed-length arrays of one
+	// element type are all WLang arrays. The name resolves to the slice, else
+	// to the array with the smallest ID, independent of map order.
+	ids := make([]string, 0, len(candidates))
+	for id := range candidates {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		descriptor := candidates[id]
+		priorID, ok := stagedNames[descriptor.LanguageName]
+		if !ok || priorID == id {
+			stagedNames[descriptor.LanguageName] = id
+			continue
+		}
+		prior, ok := candidates[priorID]
+		if !ok {
+			prior = r.descriptors[priorID]
+		}
+		if !sameSequence(prior, descriptor) {
+			return werr.Newf(werr.CodeASTShape, "language type %q maps to both %q and %q", descriptor.LanguageName, priorID, id)
+		}
+		if descriptor.Kind == types.TypeKindSlice {
+			stagedNames[descriptor.LanguageName] = id
+		}
 	}
 	for id := range candidates {
 		if err := validateDescriptorGraph(id, candidates, nil, 0); err != nil {
@@ -134,9 +158,18 @@ func (r *Registry) BindDescriptors(descriptors map[string]types.TypeDescriptor) 
 	}
 	for id, descriptor := range candidates {
 		r.descriptors[id] = descriptor
-		r.descriptorNameToID[descriptor.LanguageName] = id
 	}
+	r.descriptorNameToID = stagedNames
 	return nil
+}
+
+// sameSequence reports whether a and b are slices or arrays of one element
+// type, which share the language name array<T>.
+func sameSequence(a, b types.TypeDescriptor) bool {
+	sequence := func(kind types.TypeKind) bool {
+		return kind == types.TypeKindSlice || kind == types.TypeKindArray
+	}
+	return sequence(a.Kind) && sequence(b.Kind) && a.Elem == b.Elem
 }
 
 func descriptorZeroCost(id string, descriptors map[string]types.TypeDescriptor, memo map[string]int64) (int64, error) {
@@ -192,6 +225,12 @@ func descriptorZeroBudgetError(id string) error {
 		"type descriptor %q zero value exceeds %d expanded values", id, maxDescriptorZeroValues)
 }
 
+// validateDescriptorGraph checks that every type id reaches is defined and
+// that no type contains itself directly. A pointer, slice or map breaks a
+// cycle: its zero value is nil, so recursive types such as
+// type Node struct{ Children []*Node } are valid, exactly as in Go. Only the
+// chains of direct containment (record fields, array elements, alias
+// underlying types) are followed, and their depth is bounded.
 func validateDescriptorGraph(id string, descriptors map[string]types.TypeDescriptor, stack map[string]bool, depth int) error {
 	if isBuiltinTypeID(id) {
 		return nil
@@ -207,16 +246,19 @@ func validateDescriptorGraph(id string, descriptors map[string]types.TypeDescrip
 		stack = map[string]bool{}
 	}
 	if stack[id] {
-		return werr.Newf(werr.CodeType, "recursive type descriptor %q is not supported", id)
+		return werr.Newf(werr.CodeType, "type descriptor %q contains itself without a pointer, slice or map", id)
 	}
-	next := make(map[string]bool, len(stack)+1)
-	for key, value := range stack {
-		next[key] = value
-	}
-	next[id] = true
-	refs := descriptorReferences(descriptor)
-	for _, ref := range refs {
-		if err := validateDescriptorGraph(ref, descriptors, next, depth+1); err != nil {
+	stack[id] = true
+	defer delete(stack, id)
+	indirect := descriptor.Kind == types.TypeKindPointer || descriptor.Kind == types.TypeKindSlice || descriptor.Kind == types.TypeKindMap
+	for _, ref := range descriptorReferences(descriptor) {
+		if indirect {
+			if _, ok := descriptors[ref]; !ok && !isBuiltinTypeID(ref) {
+				return werr.Newf(werr.CodeSymbol, "type descriptor %q is not defined", ref)
+			}
+			continue
+		}
+		if err := validateDescriptorGraph(ref, descriptors, stack, depth+1); err != nil {
 			return err
 		}
 	}
@@ -925,7 +967,8 @@ func primitiveZero(typeName string) (types.Value, bool) {
 		return types.NewValue(types.TFloat32, float32(0)), true
 	case types.TFloat64:
 		return types.NewValue(types.TFloat64, float64(0)), true
-	case types.TNull:
+	case types.TNull, types.TAny:
+		// The zero value of any is nil.
 		v, _ := types.NewNull()
 		return v, true
 	}
@@ -1861,7 +1904,12 @@ func coerce(v types.Value, target reflect.Type) (reflect.Value, error) {
 		return reflect.Value{}, werr.Newf(werr.CodeType,
 			"cannot pass null as %s", target)
 	}
-	if _, ok := types.AsRecord(v); ok {
+	if record, ok := types.AsRecord(v); ok {
+		if target.Kind() == reflect.Interface && reflect.TypeOf(record).Implements(target) {
+			// A host parameter of type any receives the record itself and
+			// encodes it through the descriptors (EncodeJSONValue).
+			return reflect.ValueOf(record), nil
+		}
 		return materializeValue(v, target)
 	}
 	gv := reflect.ValueOf(v.Go())

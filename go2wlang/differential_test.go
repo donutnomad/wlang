@@ -160,7 +160,7 @@ var differentialCases = []differentialCase{
 	{fn: differential.SwitchNoMatch},
 	{fn: differential.DeferInLoop},
 	{fn: differential.NewScalarPointer, reject: "assignment target is not supported"},
-	{fn: differential.GenericStruct, reject: "composite literal type is not supported"},
+	{fn: differential.GenericStruct, reject: "generic type instantiations are not supported"},
 	{fn: differential.MapRangeValueWrite},
 	{fn: differential.MinBuiltin, reject: "builtin min is not supported"},
 	{fn: differential.MinConstantFolded},
@@ -227,6 +227,21 @@ var differentialCases = []differentialCase{
 	{fn: differential.HelperGeneric, reject: "generic function Map is not supported"},
 	{fn: differential.HelperVariadic, reject: "variadic function sum is not supported"},
 	{fn: differential.HelperPackageVariable, reject: "package-level variable counter is not supported"},
+
+	// Every data type the program touches is registered, at any depth.
+	{fn: differential.DeepNestedLiteral},
+	{fn: differential.DeepNestedZero},
+	{fn: differential.DeepNestedCopy},
+	{fn: differential.DeepOnlyInsideLiteral},
+	{fn: differential.NamedSliceMap},
+	{fn: differential.NamedSliceMapLiterals},
+	{fn: differential.NamedSliceMapZero},
+	{fn: differential.RecursiveTree},
+	{fn: differential.MutuallyRecursive},
+	{fn: differential.CrossPackageTypes},
+	{fn: differential.CrossPackageOnlyInsideLiteral},
+	{fn: differential.ChannelInsideNesting, reject: "Courier.Hops[].Queue (chan int): channels cannot cross workflow boundaries"},
+	{fn: differential.FunctionInsideNesting, reject: "Callbacks.OnDone[] (func() int): functions cannot cross workflow boundaries"},
 }
 
 const differentialSource = "testdata/differential/cases.go"

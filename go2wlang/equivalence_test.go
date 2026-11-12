@@ -161,7 +161,7 @@ func eqBuildFailureReason(step string, err error) eqFailureReason {
 }
 
 func eqBuildFailureReasonValue(step string, err error) types.Value {
-	return types.NewValue("eqFailureReason", eqBuildFailureReason(step, err))
+	return types.NewValue("orders.eqFailureReason", eqBuildFailureReason(step, err))
 }
 
 func eqReserve(ctx eqWorkflowContext, orderID string) eqReserveResult {
@@ -541,7 +541,7 @@ func OrderWorkflow(ctx workflow.Context, runner *eqWorkflowRunner, input eqOrder
 		t.Fatalf("BindGoPackage temporal: %v", err)
 	}
 	for name, typ := range map[string]reflect.Type{
-		"eqFailureReason":          reflect.TypeFor[eqFailureReason](),
+		"orders.eqFailureReason":   reflect.TypeFor[eqFailureReason](),
 		"orders.eqReserveResult":   reflect.TypeFor[eqReserveResult](),
 		"orders.eqMarkFailedInput": reflect.TypeFor[eqMarkFailedInput](),
 	} {
